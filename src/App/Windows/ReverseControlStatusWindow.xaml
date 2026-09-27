@@ -3,46 +3,137 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
         xmlns:animations="clr-namespace:IPhoneMirror.UI.Animations"
-        Width="574" SizeToContent="Height" MaxHeight="720" ResizeMode="NoResize"
-        WindowStartupLocation="CenterOwner" WindowStyle="None" ExtendsContentIntoTitleBar="True"
-        WindowBackdropType="Mica" WindowCornerPreference="Round" ShowInTaskbar="False"
+        Width="520" SizeToContent="Height" MinHeight="360" MaxHeight="680"
+        ResizeMode="NoResize" WindowStartupLocation="CenterOwner" WindowStyle="None"
+        ExtendsContentIntoTitleBar="True" WindowBackdropType="None"
+        WindowCornerPreference="Round" ShowInTaskbar="False"
         Background="{DynamicResource WindowBackgroundBrush}" Foreground="{DynamicResource TextBrush}">
-    <Border Style="{StaticResource ModernDialogSurface}" Background="{DynamicResource DialogSurfaceBrush}"
-            Margin="0" Padding="25,24,25,20" BorderThickness="0"
-            CornerRadius="0" Effect="{x:Null}">
+    <Border Style="{StaticResource ModernDialogSurface}" Padding="22,28,22,20">
         <Grid animations:PageTransition.IsEnabled="True">
-            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="20"/><RowDefinition Height="Auto"/><RowDefinition Height="16"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-            <Grid Style="{StaticResource SubWindowHeader}" animations:WindowDragBehavior.IsEnabled="True">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/><RowDefinition Height="18"/>
+                <RowDefinition Height="Auto"/><RowDefinition Height="18"/>
+                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0" Style="{StaticResource SubWindowHeader}" animations:WindowDragBehavior.IsEnabled="True">
+                <StackPanel Margin="0,0,48,0">
+                    <TextBlock Text="{DynamicResource ReverseControlTitle}" Style="{StaticResource SubWindowTitle}"/>
+                    <TextBlock Text="{Binding DeviceSummary}" Foreground="{DynamicResource MutedTextBrush}" FontSize="13" Margin="0,4,0,0"/>
+                </StackPanel>
                 <Button Style="{StaticResource SubWindowCloseButton}" Click="OnCloseClick">
                     <ui:SymbolIcon Style="{StaticResource ButtonSymbolIcon}" Symbol="Dismiss20" FontSize="18"/>
                 </Button>
-            <StackPanel HorizontalAlignment="Center">
-                <Border Width="52" Height="52" CornerRadius="26" Background="{DynamicResource ControlFillBrush}">
-                    <Ellipse Width="13" Height="13" Fill="{DynamicResource AccentBrush}"/>
-                </Border>
-                <TextBlock Text="{Binding StageTitle}" Style="{StaticResource SubWindowTitle}" HorizontalAlignment="Center" Margin="0,11,0,0"/>
-                <TextBlock Text="{Binding StageDescription}" Foreground="{DynamicResource MutedTextBrush}" FontSize="14" TextWrapping="Wrap" TextAlignment="Center" Margin="0,3,0,0"/>
-                <TextBlock Text="{Binding DeviceSummary}" Foreground="{DynamicResource MutedTextBrush}" Opacity="0.78" FontSize="12" HorizontalAlignment="Center" Margin="0,5,0,0"/>
-                <TextBlock Text="{Binding CountdownText}" Foreground="{DynamicResource AccentBrush}" FontSize="12" HorizontalAlignment="Center" Margin="0,5,0,0"/>
-            </StackPanel>
             </Grid>
-            <Border Grid.Row="2" Background="{DynamicResource ControlFillBrush}" CornerRadius="17" Padding="14,13">
-            <ItemsControl ItemsSource="{Binding Stages}">
-                <ItemsControl.ItemTemplate><DataTemplate>
-                    <Grid Height="31"><Grid.ColumnDefinitions><ColumnDefinition Width="32"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="{Binding Marker}" FontSize="17" Foreground="{Binding MarkerBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="{DynamicResource TextBrush}" FontSize="16" VerticalAlignment="Center"/>
-                        <TextBlock Grid.Column="2" Text="{Binding DurationText}" Foreground="{DynamicResource MutedTextBrush}" FontSize="12" VerticalAlignment="Center" Margin="8,0,0,0"/>
-                    </Grid>
-                </DataTemplate></ItemsControl.ItemTemplate>
-            </ItemsControl>
+            <StackPanel Grid.Row="2" HorizontalAlignment="Center">
+                <Border Width="46" Height="46" CornerRadius="23" Background="{DynamicResource AccentFillBrush}" HorizontalAlignment="Center">
+                    <ui:SymbolIcon Symbol="Cursor20" FontSize="21" Foreground="{DynamicResource OnAccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+                <TextBlock Text="{Binding StageTitle}" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,10,0,0"/>
+                <TextBlock Text="{Binding StageDescription}" FontSize="13" Foreground="{DynamicResource MutedTextBrush}" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="430" Margin="0,4,0,0"/>
+            <TextBlock Text="{Binding CountdownText}" FontSize="12" Foreground="{DynamicResource AccentTextBrush}" HorizontalAlignment="Center" Margin="0,5,0,0"/>
+                <TextBlock Text="{Binding TotalDurationText}" FontSize="11" Foreground="{DynamicResource MutedTextBrush}" HorizontalAlignment="Center" Margin="0,3,0,0"/>
+            </StackPanel>
+            <Border Grid.Row="4" Style="{StaticResource SettingsSection}" Padding="14,10"
+                    MinHeight="180">
+                <ItemsControl ItemsSource="{Binding Stages}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid MinHeight="32">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="28"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding Marker}" FontSize="16" Foreground="{Binding MarkerBrush}" VerticalAlignment="Center"/>
+                                <TextBlock Grid.Column="1" Text="{Binding Title}" FontSize="14" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center"/>
+                                <TextBlock Grid.Column="2" Text="{Binding DurationText}" FontSize="11" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </Border>
-            <Expander Grid.Row="4" Header="查看详细信息" IsExpanded="{Binding IsDetailsExpanded}" Foreground="{DynamicResource MutedTextBrush}" Background="{DynamicResource ControlFillBrush}" Padding="14,8" Margin="1,0">
-                <ListBox ItemsSource="{Binding Diagnostics}" MaxHeight="150" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource MutedTextBrush}" FontFamily="Consolas" FontSize="10" Margin="0,8,0,0"/>
+            <Border Grid.Row="5" Style="{StaticResource SettingsSection}" Padding="14,12"
+                    Margin="0,8,0,2" Visibility="{Binding BluetoothPairingStepsVisibility}">
+                <StackPanel>
+                    <TextBlock Text="请在手机和 Windows 上完成蓝牙连接" FontSize="13"
+                               FontWeight="SemiBold" Margin="0,0,0,9"/>
+                    <Grid Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="1" Foreground="{DynamicResource AccentTextBrush}" FontWeight="SemiBold"/>
+                        <TextBlock Grid.Column="1" Text="{Binding BluetoothPairStepOneText}" TextWrapping="Wrap" FontSize="11"/>
+                    </Grid>
+                    <Grid Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="2" Foreground="{DynamicResource AccentTextBrush}" FontWeight="SemiBold"/>
+                        <TextBlock Grid.Column="1" Text="{Binding BluetoothPairStepTwoText}" TextWrapping="Wrap" FontSize="11"/>
+                    </Grid>
+                    <Grid Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="3" Foreground="{DynamicResource AccentTextBrush}" FontWeight="SemiBold"/>
+                        <TextBlock Grid.Column="1" Text="{Binding BluetoothPairStepThreeText}" TextWrapping="Wrap" FontSize="11"/>
+                    </Grid>
+                    <Grid Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="4" Foreground="{DynamicResource AccentTextBrush}" FontWeight="SemiBold"/>
+                        <TextBlock Grid.Column="1" Text="{Binding BluetoothPairStepFourText}" TextWrapping="Wrap" FontSize="11"/>
+                    </Grid>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="5" Foreground="{DynamicResource AccentTextBrush}" FontWeight="SemiBold"/>
+                        <TextBlock Grid.Column="1" Text="{Binding BluetoothPairStepFiveText}" TextWrapping="Wrap" FontSize="11"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+            <Border Grid.Row="5" Style="{StaticResource SettingsSection}" Padding="14" Margin="0,0,0,2"
+                    Visibility="{Binding PromptVisibility}">
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <Border Width="28" Height="28" CornerRadius="14"
+                                Background="{Binding PromptAccentBrush}">
+                            <ui:SymbolIcon Symbol="Info20" Foreground="{DynamicResource OnAccentBrush}"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <TextBlock Text="{Binding PromptTitle}" FontSize="15" FontWeight="SemiBold"
+                                   VerticalAlignment="Center" Margin="10,0,0,0"/>
+                    </StackPanel>
+                    <TextBlock Text="{Binding PromptMessage}" TextWrapping="Wrap" FontSize="13"
+                               Margin="0,10,0,0"/>
+                    <ListBox ItemsSource="{Binding PromptOptions}" SelectedItem="{Binding SelectedPromptOption, Mode=TwoWay}"
+                             Visibility="{Binding PromptOptionsVisibility}" BorderThickness="0"
+                             Background="Transparent" Margin="0,10,0,0" MaxHeight="150">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="{DynamicResource ControlFillBrush}"
+                                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                                        CornerRadius="8" Padding="10,8" Margin="0,0,0,6"
+                                        IsEnabled="{Binding IsEnabled}">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding Detail}" TextWrapping="Wrap"
+                                                   Foreground="{DynamicResource MutedTextBrush}" FontSize="11"
+                                                   Margin="0,3,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBlock Text="{Binding PromptTechnicalDetails}" Visibility="{Binding PromptTechnicalDetailsVisibility}"
+                               Foreground="{DynamicResource MutedTextBrush}" FontFamily="Consolas" FontSize="10"
+                               TextWrapping="Wrap" Margin="0,9,0,0"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                        <Button Content="{Binding PromptSecondaryText}" Click="OnPromptSecondaryClick"
+                                Visibility="{Binding PromptSecondaryVisibility}" MinWidth="84" Height="34" Margin="0,0,8,0"/>
+                        <Button Content="{Binding PromptPrimaryText}" Click="OnPromptPrimaryClick"
+                                Visibility="{Binding PromptPrimaryVisibility}" IsEnabled="{Binding IsPromptPrimaryEnabled}"
+                                MinWidth="96" Height="34" Style="{StaticResource PrimaryButton}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+            <Expander Grid.Row="6" Header="{DynamicResource ReverseControlDetails}" IsExpanded="{Binding IsDetailsExpanded}" Foreground="{DynamicResource MutedTextBrush}" FontSize="13">
+                <ListBox ItemsSource="{Binding Diagnostics}" MaxHeight="130" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource MutedTextBrush}" FontFamily="Consolas" FontSize="10" Margin="0,6,0,0"/>
             </Expander>
-            <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,9,0">
-                <Button Content="取消" Click="OnCancelClick" Visibility="{Binding CancelVisibility}" MinWidth="108" Height="52" FontSize="16"/>
-                <Button Content="关闭" Click="OnCloseClick" Visibility="{Binding CloseVisibility}" MinWidth="108" Height="52" FontSize="16" Margin="8,0,0,0"/>
+            <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+                <Button Content="{DynamicResource ReverseControlRetry}" Click="OnRetryClick" Visibility="{Binding RetryVisibility}"
+                        MinWidth="88" Height="36" Margin="0,0,8,0"/>
+                <Button Content="{DynamicResource Cancel}" Click="OnCancelClick" Visibility="{Binding CancelVisibility}" MinWidth="88" Height="36" Margin="0,0,8,0"/>
+                <Button Content="{DynamicResource Close}" Click="OnCloseClick" Visibility="{Binding CloseVisibility}" MinWidth="88" Height="36" Style="{StaticResource PrimaryButton}"/>
             </StackPanel>
         </Grid>
     </Border>

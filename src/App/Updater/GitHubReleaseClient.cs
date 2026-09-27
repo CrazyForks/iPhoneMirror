@@ -528,12 +528,14 @@ internal sealed class GitHubReleaseClient : IDisposable
             ("reachable", reachable.Length), ("measured", available.Length),
             ("selected", available.FirstOrDefault()?.Uri.Host ?? "unmeasured"),
             ("probe_bytes", MirrorProbeBytes));
-        return available.Length > 0
-            ? available.Select(probe => probe.Uri).ToArray()
+        var ranked = available.Length > 0
+            ? available.Select(probe => probe.Uri).ToList()
             : successfulPings
                 .OrderBy(result => result.Milliseconds)
                 .Select(result => result.Uri)
-                .ToArray();
+                .ToList();
+        if (!ranked.Contains(asset.DownloadUri)) ranked.Add(asset.DownloadUri);
+        return ranked;
     }
 
     private async Task<ReachableDownloadCandidate?> PingDownloadCandidateAsync(

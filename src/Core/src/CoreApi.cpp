@@ -1489,11 +1489,14 @@ std::int32_t IM_CALL im_wireless_session_create(const wchar_t* device_id,
                 L"Core closed while creating wireless session");
         }
         const auto id = next_session_handle++;
+        const auto device_fingerprint =
+            iPhoneMirror::logging::fingerprint(narrow(device_id));
+        const auto log_message = std::format(
+            "wireless_session create handle={} device_fp={}", id,
+            device_fingerprint);
         multi_sessions.emplace(id, std::move(context));
         *handle = id;
-        iPhoneMirror::logging::write(std::format(
-            "wireless_session create handle={} device_fp={}", id,
-            iPhoneMirror::logging::fingerprint(narrow(device_id))));
+        iPhoneMirror::logging::write(log_message);
         last_error.clear();
         return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
     } catch (const std::exception& error) {

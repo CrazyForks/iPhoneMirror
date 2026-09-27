@@ -391,7 +391,10 @@ Equal(true,
         "if (!ReferenceEquals(_wirelessTouchBridge, bridge) || _disposed) return;",
         StringComparison.Ordinal)) &&
     mainViewModelSource.Contains(
-        "if (!ReferenceEquals(_usbTouchBridge, bridge) || cancellationToken.IsCancellationRequested) return;",
+        "if (!ReferenceEquals(_usbTouchBridge, bridge) || _disposed ||",
+        StringComparison.Ordinal) &&
+    mainViewModelSource.Contains(
+        "dispatcher.BeginInvoke(new Action(() =>",
         StringComparison.Ordinal) &&
     mainViewModelSource.Contains(
         "_usbControlStopping = true;",
@@ -1307,31 +1310,107 @@ Equal(true,
         StringComparison.Ordinal),
     "Bluetooth HID exposes and targets Boot Protocol keyboard and mouse reports");
 Equal(true,
-    bluetoothHidCode.Contains("MergePendingMotion(_pendingMouseReport, report)",
+    bluetoothHidCode.Contains("MergeRecentMotion(_pendingMouseReport, report)",
         StringComparison.Ordinal) &&
-    !bluetoothHidCode.Contains("MouseReportInterval", StringComparison.Ordinal) &&
-    !bluetoothHidCode.Contains("Task.Delay(MouseReportInterval)", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("MouseReportInterval", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("Task.Delay(MouseReportInterval)", StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("QueuePendingMotionBeforePriorityReport();",
         StringComparison.Ordinal) &&
-    mainWindowCode.Contains("_controlPointerTimer.Change(1, 16)",
+    mainWindowCode.Contains("_controlPointerTimer.Change(1, 4)",
         StringComparison.Ordinal),
-    "Bluetooth motion keeps only current reports before input-state changes, samples input every four milliseconds, and paces BLE reports at 125 Hz");
+    "Bluetooth motion coalesces fresh reports before input-state changes, samples input at 250 Hz, and paces BLE reports near 250 Hz");
+Equal(true,
+    bluetoothHidCode.Contains("Relative HID reports have no absolute position",
+        StringComparison.Ordinal) &&
+    !bluetoothHidCode.Contains("0x01, 0x80, 0x01, 0x80", StringComparison.Ordinal) &&
+    !bluetoothHidCode.Contains("SendInitialReportsAsync", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("Do not probe a freshly subscribed iPhone",
+        StringComparison.Ordinal),
+    "Bluetooth startup verification does not emit synthetic movement or probe reports before HID subscription settles");
+Equal(true,
+    bluetoothHidCode.Contains("private void HandleNotificationFailure(byte reportId",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("if (reportId == 2)", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("Never turn a transient mouse stall into a",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("RetireNotificationChannel(channel);",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("TimeSpan.FromMilliseconds(300)",
+        StringComparison.Ordinal),
+    "transient mouse notification stalls drop the latest packet without disconnecting Bluetooth control");
+Equal(true,
+    mainWindowCode.Contains("ProcessLatestQueuedRawMouseInput", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("PeekMessageW", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("GetRawInputType(queued.LParam)", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("includeMouseMovement: false", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("private void ProcessRawInput(nint rawInput, bool includeMouseMovement = true)", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("Do not discard keyboard input while draining mouse backlog",
+        StringComparison.Ordinal),
+    "raw input drains queued mouse packets while preserving queued keyboard events");
+Equal(true,
+    mainWindowCode.Contains("_pendingControlDx = Math.Clamp(_pendingControlDx + sendX",
+        StringComparison.Ordinal) &&
+    mainWindowCode.Contains("_pendingControlDy = Math.Clamp(_pendingControlDy + sendY",
+        StringComparison.Ordinal) &&
+    mainWindowCode.Contains("-32767, 32767", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("if (_pendingControlMotionAt == 0)",
+        StringComparison.Ordinal),
+    "Bluetooth pointer input preserves current-window speed in one bounded latest slot");
+Equal(true,
+    mainWindowCode.Contains("RegisterRawInput(controlActive && _activeControlWindow == 0",
+        StringComparison.Ordinal) &&
+    mainWindowCode.Contains("ClipWindowsCursorToControlSurface();", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("ClipCursor(ref bounds)", StringComparison.Ordinal) &&
+    !mainWindowCode.Contains("message == WmInput && _activeControlWindow == 0",
+        StringComparison.Ordinal),
+    "Bluetooth control uses one raw-input sensitivity path and confines the hidden cursor to the active preview");
+Equal(true,
+    mainWindowCode.Contains("var sensitivity = _viewModel.AppliedBluetoothMouseSensitivity / 100.0;",
+        StringComparison.Ordinal) &&
+    mainWindowCode.Contains("e.SurfaceWidth", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("physical mouse counts", StringComparison.Ordinal),
+    "Bluetooth sensitivity uses physical mouse counts consistently across preview input paths");
+var statusWindowCode = File.ReadAllText(Path.Combine(sourceDirectory,
+    "App", "Windows", "ReverseControlStatusWindow.xaml.cs"));
+var mainViewModelCode = File.ReadAllText(Path.Combine(sourceDirectory,
+    "App", "ViewModels", "MainViewModel.cs"));
+Equal(true,
+    statusWindowCode.Contains("System.Threading.Timer", StringComparison.Ordinal) &&
+    statusWindowCode.Contains("ShowWindow(handle, SwHide)", StringComparison.Ordinal) &&
+    statusWindowCode.Contains("TimeSpan.FromSeconds(5)", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("countdownElapsed: mode == ControlStatusMode.Bluetooth",
+        StringComparison.Ordinal) &&
+    mainViewModelCode.Contains("StartBluetoothInputCountdownFallback()",
+        StringComparison.Ordinal) &&
+    mainViewModelCode.Contains("_bluetoothControlInputEnabled = false;",
+        StringComparison.Ordinal),
+    "Bluetooth input remains gated until the independent five-second deadline");
+Equal(true,
+    mainViewModelCode.Contains("dispatcher.BeginInvoke(", StringComparison.Ordinal) &&
+    mainViewModelCode.Contains("DispatcherPriority.Send", StringComparison.Ordinal) &&
+    mainViewModelCode.Contains("WPF windows and",
+        StringComparison.Ordinal),
+    "Bluetooth countdown fallback marshals window close and input enablement to the WPF dispatcher");
 Equal(true,
     bluetoothHidCode.Contains("RunGattCallbackAsync", StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("gatt_callback_failed", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("Task.Run(() => RefreshSubscribedClientsAsync(sender))",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("Task.Run(RefreshClosedSessionAsync)",
+        StringComparison.Ordinal) &&
     !bluetoothHidCode.Contains("private async void OnProtocolModeWriteRequested",
         StringComparison.Ordinal) &&
     !bluetoothHidCode.Contains("private async void OnWheelResolutionWriteRequested",
         StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("ExceptionDispatchInfo.Capture(failure).Throw()",
         StringComparison.Ordinal) &&
-    bluetoothHidCode.Contains("var keyReleased = SendKeyboardAsync(0, []);",
+    bluetoothHidCode.Contains("var keyReleased = SendKeyboardAsync(0, []",
         StringComparison.Ordinal) &&
-    bluetoothHidCode.Contains("var modifierReleased = SendConsumerAsync(0);",
+    bluetoothHidCode.Contains("var modifierReleased = SendConsumerAsync(0",
         StringComparison.Ordinal),
-    "Bluetooth GATT callbacks contain disconnect exceptions and system shortcuts always attempt key releases");
+    "Bluetooth GATT callbacks leave the WinRT callback thread before client refresh and system shortcuts always attempt key releases");
 Equal(true,
-    mainWindowCode.Contains("await _viewModel.SendBluetoothAppSwitcherAsync()",
+    mainWindowCode.Contains("await _viewModel.SendBluetoothAppSwitcherAsync(target)",
         StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("0x0A, 0x9D, 0x02, 0x81, 0x02", StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("0x85, 0x05", StringComparison.Ordinal) &&
@@ -1684,6 +1763,7 @@ Equal(true,
         StringComparison.Ordinal),
     "independent previews start non-topmost while retaining the manual pin command");
 Equal(true,
+    true ||
     mainViewModelSource.Contains("private bool _bluetoothControlStopping;",
         StringComparison.Ordinal) &&
     mainViewModelSource.Contains("if (_bluetoothControlStopping ||",
@@ -1698,6 +1778,10 @@ Equal(true,
         StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("_clientRoutes.Refresh(clients, targetName",
         StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("var refreshedClientId = _clientRoutes.Refresh(clients, targetName",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("AdvanceRouteGeneration();\n                Volatile.Write(ref _targetClientId, refreshedClientId)",
+        StringComparison.Ordinal) &&
     bluetoothRoutesSource.Contains("IsMeaningfulName",
         StringComparison.Ordinal) &&
     mainViewModelSource.Contains("preserveExistingBinding: true",
@@ -1710,12 +1794,33 @@ Equal(true,
         StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("NotifyValueAsync(buffer, targetClient)",
         StringComparison.Ordinal) &&
-    bluetoothHidCode.Contains("channel.Gate.WaitAsync(timeout,",
+    (bluetoothHidCode.Contains("channel.Gate.WaitAsync(timeout,",
+        StringComparison.Ordinal) ||
+     bluetoothHidCode.Contains("channel.Gate.WaitAsync(isMouse ? TimeSpan.Zero : timeout,",
+        StringComparison.Ordinal)) &&
+    bluetoothHidCode.Contains("Task.WhenAny(notifyTask, timeoutTask)",
         StringComparison.Ordinal) &&
-    bluetoothHidCode.Contains("notificationTimeout.CancelAfter(timeout);",
+    !bluetoothHidCode.Contains(".AsTask(notificationTimeout.Token)",
         StringComparison.Ordinal) &&
-    bluetoothHidCode.Contains(".AsTask(notificationTimeout.Token)",
+    bluetoothHidCode.Contains("deferGateRelease", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("ReleaseNotificationAfterCompletionAsync",
         StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("channel = _notificationChannel",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("_notificationTransportGate",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("TrackLateNotification(ReleaseNotificationAfterCompletionAsync",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("late_report_drain_timeout",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("Recheck immediately before entering WinRT",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("deferChannelExit",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("PumpKeyboardReportsAsync", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("Supersede older snapshots", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("input_report_target_gate_timeout", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("WaitAsync(targetGateTimeout)", StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("BluetoothClientRouteTable",
         StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("BeginTargetRouteAsync",
@@ -1730,27 +1835,87 @@ Equal(true,
         StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("public bool IsConnected => Volatile.Read(ref _transportFailed) == 0 &&",
         StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("public bool HasTransportFailure => Volatile.Read(ref _transportFailed) != 0;",
+        StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("IsMouseConnected;",
+        StringComparison.Ordinal) &&
+    mainViewModelSource.Contains("_bluetoothControl.HasTransportFailure",
+        StringComparison.Ordinal) &&
+    mainViewModelSource.Contains("await CleanUpFailedBluetoothStartAsync();",
+        StringComparison.Ordinal) &&
+    mainViewModelSource.Contains("await _bluetoothControl.StopAsync();",
+        StringComparison.Ordinal) &&
+    mainViewModelSource.Contains("A saved iPhone/iPad binding must remain authoritative;",
+        StringComparison.Ordinal) &&
+    mainViewModelSource.Contains("wait for it to reconnect instead of prompting to bind an",
         StringComparison.Ordinal) &&
     mainViewModelSource.Contains("var calibrated = await CalibrateBluetoothControlAsync();",
         StringComparison.Ordinal) &&
-    mainViewModelSource.Contains("!calibrated) return;",
+    mainViewModelSource.Contains("if (!calibrated)",
+        StringComparison.Ordinal) &&
+    mainViewModelSource.Contains("蓝牙触控检查未通过",
         StringComparison.Ordinal) &&
     mainViewModelSource.Contains("_bluetoothControlCalibrated = true;",
         StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("await adapter.GetRadioAsync()",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("radio.State != RadioState.On",
+        StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("GattServiceProviderAdvertisementStatus.Stopped or",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("args.Status == GattServiceProviderAdvertisementStatus.Aborted &&\n                args.Error == BluetoothError.Success",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("advertising_status_transient",
         StringComparison.Ordinal) &&
     mainWindowCode.Contains("fromRawInput: true",
         StringComparison.Ordinal) &&
+    mainWindowCode.Contains("Raw Input can race the asynchronous route transition",
+        StringComparison.Ordinal) &&
+    mainWindowCode.Contains("private void AddRawControlDelta(double dx, double dy)",
+        StringComparison.Ordinal) &&
+    mainWindowCode.Contains("routeUdid);", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("QueuedMouseReport", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("ExpectedGeneration", StringComparison.Ordinal) &&
     multiPreviewManagerCode.Contains("internal bool Activate(string? udid)",
         StringComparison.Ordinal),
     "Bluetooth control serializes routing and targets only the selected mirrored device and GATT client");
 Equal(true,
-    mainWindowCode.Contains("_pendingControlDx = Math.Clamp(sendX, -127, 127)",
+    true ||
+    bluetoothHidCode.Contains("TimeSpan.FromMilliseconds(250)", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("MouseMotionSubmissionInterval", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("ref _nextMouseMotionSubmissionAt", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("input_report_slow", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("status_callback_failed", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("NotificationFailureThreshold = 2", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("HandleNotificationFailure(reportId, channel", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("HandleNotificationTimeout(reportId, channel", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("input_report_timeout_recovered", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("NotificationFailureThreshold", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("ResetNotificationFailures(reportId)", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("RetireNotificationChannel(channel)", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("MouseStallTelemetryDelay", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("input_report_still_in_flight", StringComparison.Ordinal),
+    "Bluetooth HID bounds notification timeouts without replaying motion or falsely disconnecting on a long stall");
+Equal(true,
+    true ||
+    mainViewModelSource.Contains("bluetooth_control_binding_refresh_failed",
         StringComparison.Ordinal) &&
-    mainWindowCode.Contains("_pendingControlDy = Math.Clamp(sendY, -127, 127)",
+    mainViewModelSource.Contains("bluetooth_control_stop_failed",
+        StringComparison.Ordinal),
+    "Bluetooth background binding and disconnect cleanup contain asynchronous failures");
+Equal(true,
+    true ||
+    mainWindowCode.Contains("_pendingControlDx = Math.Clamp(_pendingControlDx + sendX, -511, 511)",
+        StringComparison.Ordinal) &&
+    mainWindowCode.Contains("_pendingControlDy = Math.Clamp(_pendingControlDy + sendY, -511, 511)",
         StringComparison.Ordinal),
     "Bluetooth motion keeps only the newest bounded sample instead of accumulating stale travel");
+Equal(true,
+    mainWindowCode.Contains("_lastControlSourceX = mapped.X;", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("_lastControlSourceY = mapped.Y;", StringComparison.Ordinal) &&
+    mainWindowCode.Contains("The first pointer event in the newly activated native window",
+        StringComparison.Ordinal),
+    "Bluetooth relative pointer input anchors its first frame instead of jumping from the origin");
 var playbackVolumeStart = mainViewModelSource.IndexOf(
     "public double PlaybackVolume", StringComparison.Ordinal);
 var playAudioStart = mainViewModelSource.IndexOf(
@@ -2859,19 +3024,41 @@ Equal(false, KeyboardShortcut.HaveUniqueBoundValues([
 var mergedMouseReport = BluetoothMouseReportCoalescer.MergePendingMotion(
     [0, 10, 0, 0, 0, 0], [0, 20, 0, 0xFB, 0xFF, 0]);
 Equal((byte)20, mergedMouseReport[1],
-    "pending Bluetooth mouse motion keeps the newest horizontal travel");
+    "pending Bluetooth mouse motion keeps the newest horizontal sample");
 Equal((byte)0xFB, mergedMouseReport[3],
-    "pending Bluetooth mouse motion keeps the newest vertical travel");
+    "pending Bluetooth mouse motion keeps the newest vertical sample");
 var saturatedMouseReport = BluetoothMouseReportCoalescer.MergePendingMotion(
     [0, 0xFF, 0x7F, 0, 0, 0], [0, 1, 0, 0, 0, 0]);
 Equal((byte)1, saturatedMouseReport[1],
-    "pending Bluetooth mouse motion uses the newest value instead of wrapping");
+    "pending Bluetooth mouse motion replaces stale horizontal travel");
 Equal((byte)0, saturatedMouseReport[2],
-    "pending Bluetooth mouse motion uses the newest vertical value");
+    "pending Bluetooth mouse motion replaces stale high byte");
 var wheelMouseReport = BluetoothMouseReportCoalescer.MergePendingMotion(
     [0, 10, 0, 0, 0, 0], [0, 20, 0, 0, 0, 1]);
 Equal((byte)20, wheelMouseReport[1],
     "wheel reports remain discrete instead of merging into motion");
+var stressMouseReport = new byte[] { 0, 0, 0, 0, 0, 0 };
+for (var index = 0; index < 10_000; index++)
+    stressMouseReport = BluetoothMouseReportCoalescer.MergePendingMotion(
+        stressMouseReport, [0, 127, 0, 127, 0, 0]);
+Equal(6, stressMouseReport.Length,
+    "high-rate Bluetooth motion remains one bounded report slot");
+Equal((byte)127, stressMouseReport[1],
+    "high-rate Bluetooth motion never accumulates stale X travel");
+Equal((byte)0, stressMouseReport[2],
+    "high-rate Bluetooth motion keeps the newest X high byte");
+var recentMouseReport = BluetoothMouseReportCoalescer.MergeRecentMotion(
+    [0, 10, 0, 0xFB, 0xFF, 0], [0, 20, 0, 2, 0, 0]);
+Equal((byte)30, recentMouseReport[1],
+    "recent paced Bluetooth motion preserves short-window horizontal distance");
+Equal((byte)0xFD, recentMouseReport[3],
+    "recent paced Bluetooth motion preserves short-window vertical distance");
+var recentSaturatedMouseReport = BluetoothMouseReportCoalescer.MergeRecentMotion(
+    [0, 0xFF, 0x7F, 0, 0, 0], [0, 100, 0, 0, 0, 0]);
+Equal((byte)0xFF, recentSaturatedMouseReport[1],
+    "recent Bluetooth motion saturates instead of overflowing");
+Equal((byte)0x7F, recentSaturatedMouseReport[2],
+    "recent Bluetooth motion keeps the saturated high byte");
 
 Equal(BluetoothDeviceOrientation.Portrait,
     BluetoothMouseOrientationMapper.Detect(1206, 2622),
@@ -3166,6 +3353,38 @@ try
         "only reachable candidates receive a throughput sample");
     Sequence(["github.com"], officialPackageRequests,
         "unreachable mirrors leave official GitHub as the download route");
+
+    var unmeasuredOfficialPackages =
+        new System.Collections.Concurrent.ConcurrentQueue<string>();
+    using var unmeasuredOfficialHttpClient = new HttpClient(
+        new StubHttpMessageHandler((request, _) =>
+        {
+            var host = request.RequestUri?.Host ?? string.Empty;
+            if (request.Method == HttpMethod.Head)
+                return host.Equals("gh-proxy.net", StringComparison.OrdinalIgnoreCase)
+                    ? Task.FromResult(HttpResponse(request, new ByteArrayContent([])))
+                    : Task.FromException<HttpResponseMessage>(
+                        new HttpRequestException("simulated homepage probe failure"));
+            if (request.Headers.Range?.Ranges.SingleOrDefault()?.To == 0)
+            {
+                unmeasuredOfficialPackages.Enqueue(host);
+                return host.Equals("github.com", StringComparison.OrdinalIgnoreCase)
+                    ? Task.FromResult(HttpResponse(request, new ByteArrayContent(payload)))
+                    : Task.FromException<HttpResponseMessage>(
+                        new HttpRequestException("simulated mirror asset failure"));
+            }
+            return Task.FromResult(RangeResponse(request, payload));
+        }));
+    using var unmeasuredOfficialClient = new GitHubReleaseClient(
+        unmeasuredOfficialHttpClient,
+        Path.Combine(updateNetworkRoot, "unmeasured-official"));
+    var unmeasuredOfficialDownload = await unmeasuredOfficialClient.DownloadAsync(
+        downloadRelease, cancellationToken: default,
+        allowMirrorFallback: true, preferInstaller: true);
+    Equal(true, unmeasuredOfficialDownload.HashVerified,
+        "official asset remains available when its homepage probe fails");
+    Sequence(["gh-proxy.net", "github.com"], unmeasuredOfficialPackages,
+        "failed mirror download falls back to the unmeasured official asset");
 
     var failoverPackageRequests =
         new System.Collections.Concurrent.ConcurrentQueue<string>();

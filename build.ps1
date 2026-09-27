@@ -226,7 +226,15 @@ function Invoke-NativeToolWithSanitizedEnvironment(
         [void]$startInfo.ArgumentList.Add($argument)
     }
 
-    $process = [Diagnostics.Process]::Start($startInfo)
+    # Construct the process explicitly.  On some PowerShell/.NET hosts the
+    # static Start overload can return $null even though the child was created,
+    # which then turns the following WaitForExit call into a null dereference
+    # and aborts the release package.
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw "Failed to start native tool: $FilePath"
+    }
     $process.WaitForExit()
     return $process.ExitCode
 }
@@ -310,8 +318,16 @@ function Clear-TestOutputs {
     foreach ($item in @(Get-ChildItem -LiteralPath $OutputsRoot -Force)) {
         if ($item.PSIsContainer) {
             if ($item.Name -in @('releases', 'release-staging')) { continue }
-            if ($item.Name -in @('Assets', 'Wireless', 'licenses', 'tools')) {
+            if ($item.Name -in @('Assets', 'Wireless', 'licenses', 'tools', 'zh-Hans', 'zh-Hant')) {
                 Remove-Item -LiteralPath $item.FullName -Recurse -Force
+                continue
+            }
+            # A cancelled test publish can leave its versioned staging
+            # directory behind before an executable has been written.
+            $children = @(Get-ChildItem -LiteralPath $item.FullName -Force)
+            if ($item.Name -match '^iPhoneMirror-test\d+$' -and
+                $children.Count -eq 0) {
+                Remove-Item -LiteralPath $item.FullName -Force
                 continue
             }
             $appExe = Join-Path $item.FullName 'iPhoneMirror.exe'
@@ -487,7 +503,12 @@ try {
         Assert-SafeWorkspaceDirectory $AppFfmpeg
         New-Item -ItemType Directory -Force -Path $AppNative | Out-Null
         New-Item -ItemType Directory -Force -Path $AppWireless | Out-Null
-        New-Item -ItemType Directory -Force -Path $AppUxPlay | Out-Null
+        if ($UseUxPlayRuntime) {
+            New-Item -ItemType Directory -Force -Path $AppUxPlay | Out-Null
+        } elseif (Test-Path -LiteralPath $AppUxPlay) {
+            Assert-NoReparseChildren $AppUxPlay
+            Remove-Item -LiteralPath $AppUxPlay -Recurse -Force
+        }
         if ($UseMediaOutputRuntime) {
             if (-not (Test-Path -LiteralPath $PrepareMediaOutputRuntime -PathType Leaf)) {
                 throw "Media-output FFmpeg preparation script is missing: $PrepareMediaOutputRuntime"
@@ -700,6 +721,9 @@ try {
         if (Test-Path -LiteralPath $uxplayRoot -PathType Container) {
             $uxplayFiles = @(Get-ChildItem -LiteralPath $uxplayRoot -Recurse -File |
                 ForEach-Object { $_.FullName.Substring($PublishRoot.Length + 1) })
+        }
+        if (-not $UseUxPlayRuntime -and $uxplayFiles.Count -ne 0) {
+            throw 'UxPlay runtime was published despite -OmitUxPlayRuntime.'
         }
         $optionalPublishedArtifacts = @(
             'Assets\iPhoneMirror.ico',

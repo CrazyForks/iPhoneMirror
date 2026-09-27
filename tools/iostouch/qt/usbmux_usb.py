@@ -132,6 +132,7 @@ class MuxConnection:
 
     # ---- called by MuxDevice reader thread
     def _on_segment(self, seg: TcpSegment) -> None:
+        forget = False
         with self._cv:
             self.rx_ack = seg.ack
             self.rx_win = seg.win
@@ -148,26 +149,38 @@ class MuxConnection:
                 self._cv.notify_all()
                 return
             if self.state == "connected":
-                if seg.flags & TH_RST or seg.flags & TH_FIN:
+                if seg.payload and not seg.flags & TH_RST:
+                    self._inbox += seg.payload
+                    self.bytes_rx += len(seg.payload)
+                    self.tx_ack = seg.seq + len(seg.payload)
+                    if not seg.flags & TH_FIN:
+                        self.mux._send_tcp(self, TH_ACK)
+                if seg.flags & (TH_RST | TH_FIN):
+                    if seg.flags & TH_FIN:
+                        self.tx_ack = seg.seq + len(seg.payload) + 1
+                        try:
+                            self.mux._send_tcp(self, TH_ACK)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("acknowledge FIN failed: %s", exc)
                     self.close_reason = "device sent " + ("RST" if seg.flags & TH_RST else "FIN")
                     logger.info("mux conn sport=%d dport=%d closed: %s (rx %d B, tx %d B, inbox %d B)",
                                 self.sport, self.dport, self.close_reason, self.bytes_rx, self.bytes_tx, len(self._inbox))
                     self.state = "dead"
                     self.closed = True
+                    forget = True
                     self._cv.notify_all()
-                    return
-                if seg.payload:
-                    self._inbox += seg.payload
-                    self.bytes_rx += len(seg.payload)
-                    self.tx_ack = seg.seq + len(seg.payload)
-                    self.mux._send_tcp(self, TH_ACK)
-                self._cv.notify_all()
+                else:
+                    self._cv.notify_all()
+        if forget:
+            self.mux._forget(self)
 
     # ---- public API
     def wait_connected(self, timeout: float = 10.0) -> None:
         with self._cv:
             self._cv.wait_for(lambda: self.state != "connecting", timeout)
             if self.state != "connected":
+                if self.close_reason:
+                    raise MuxError(self.close_reason)
                 raise ConnectionRefused(f"connect to device port {self.dport} {'refused' if self.refused else 'failed'}")
 
     def _sendable(self) -> int:
@@ -206,14 +219,21 @@ class MuxConnection:
 
     def close(self) -> None:
         with self._cv:
-            if self.closed:
-                return
+            if not self.closed:
+                self.closed = True
+                if self.state == "connected":
+                    try:
+                        self.mux._send_tcp(self, TH_RST)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("send RST failed: %s", exc)
+                self.state = "dead"
+                self._cv.notify_all()
+        self.mux._forget(self)
+
+    def abort(self, reason: str) -> None:
+        with self._cv:
+            self.close_reason = reason
             self.closed = True
-            if self.state == "connected":
-                try:
-                    self.mux._send_tcp(self, TH_RST)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("send RST failed: %s", exc)
             self.state = "dead"
             self._cv.notify_all()
         self.mux._forget(self)
@@ -234,12 +254,15 @@ class MuxDevice:
         self._lock = threading.RLock()  # 收包处理里会再发 ACK/RST，必须可重入
         self._conns: dict[int, MuxConnection] = {}
         self._next_sport = 1
+        self._failure_reason: Optional[str] = None
         self._assembler = PacketAssembler()
         self.on_control: Optional[Callable[[bytes], None]] = None
 
     # ---- outbound
     def _send_packet(self, proto: int, payload: bytes) -> None:
         with self._lock:
+            if self._failure_reason is not None:
+                raise MuxError(self._failure_reason)
             if self.version >= 2:
                 if proto == PROTO_SETUP:
                     self.tx_seq, self.rx_seq = 0, 0xFFFF
@@ -304,27 +327,40 @@ class MuxDevice:
         if not self.ready.wait(timeout):
             raise MuxError("usbmux version handshake not completed")
         with self._lock:
+            if self._failure_reason is not None:
+                raise MuxError(self._failure_reason)
             while self._next_sport in self._conns or self._next_sport == 0:
                 self._next_sport = (self._next_sport + 1) & 0xFFFF
             sport = self._next_sport
             self._next_sport = (self._next_sport + 1) & 0xFFFF
             conn = MuxConnection(self, sport, dport)
             self._conns[sport] = conn
-        self._send_tcp(conn, TH_SYN)
         try:
+            self._send_tcp(conn, TH_SYN)
             conn.wait_connected(timeout)
-        except ConnectionRefused:
+        except Exception:
             self._forget(conn)
             raise
         return conn
 
     def _forget(self, conn: MuxConnection) -> None:
         with self._lock:
-            self._conns.pop(conn.sport, None)
+            if self._conns.get(conn.sport) is conn:
+                self._conns.pop(conn.sport)
 
     def close_all(self) -> None:
-        for c in list(self._conns.values()):
+        with self._lock:
+            connections = list(self._conns.values())
+        for c in connections:
             c.close()
+
+    def abort_all(self, reason: str) -> None:
+        with self._lock:
+            self._failure_reason = reason
+            connections = list(self._conns.values())
+            self.ready.set()
+        for c in connections:
+            c.abort(reason)
 
 
 # --------------------------------------------------------------------------- libusb transport
@@ -384,6 +420,8 @@ class UsbMuxTransport:
                         continue
                     if not self._stop.is_set():
                         logger.error("usbmux read failed, reader thread exiting; all mux connections are now dead: %s", exc)
+                        self._stop.set()
+                        self.mux.abort_all(f"USB read failed: {exc}")
                     return
                 if chunk:
                     self.bytes_in += len(chunk)
@@ -397,6 +435,8 @@ class UsbMuxTransport:
         self.mux.start()
         if not self.mux.ready.wait(5.0):
             raise MuxError("device did not answer usbmux VERSION packet")
+        if self.mux._failure_reason is not None:
+            raise MuxError(self.mux._failure_reason)
 
     def close(self) -> None:
         import usb.util

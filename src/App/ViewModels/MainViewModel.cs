@@ -208,13 +208,20 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     private string _usbControlStatus = string.Empty;
     private bool _usbControlFailed;
     private bool _bluetoothControlEnabled;
+    // StartAsync completes from the authoritative GATT Started event. Keep
+    // that result separate from IsAdvertising because Windows can lag when
+    // its AdvertisementStatus property is queried immediately afterwards.
+    private bool _bluetoothControlStartSucceeded;
     private bool _reverseControlSetupActive;
     private bool _bluetoothControlConnected;
     private bool _bluetoothControlCalibrated;
     private bool _bluetoothCalibrationInProgress;
+    private CancellationTokenSource? _bluetoothInputCountdownCts;
     private bool _bluetoothControlInputEnabled;
     private bool _bluetoothControlNoticePending;
     private int _bluetoothBindingPromptInFlight;
+    private int _bluetoothWaitingPromptInFlight;
+    private int _bluetoothConnectedPromptInFlight;
     private int _reverseControlErrorPromptInFlight;
     private readonly HashSet<string> _bluetoothBindingPromptedTargets =
         new(StringComparer.OrdinalIgnoreCase);
@@ -333,7 +340,10 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     internal string? BluetoothControlTargetUdid => _bluetoothControlDeviceUdid;
     public bool BluetoothControlIsInputEnabled => _bluetoothControlEnabled &&
         _bluetoothControlConnected && _bluetoothControlInputEnabled &&
-        _bluetoothControl.IsConnected;
+        // This property is read from the process-wide keyboard hook as well
+        // as the WPF dispatcher. Do not query WinRT GATT objects from that
+        // hook thread; the connection event already publishes this state.
+        !_bluetoothControl.HasTransportFailure;
     public bool CanStartBluetoothControl => CanEnableBluetoothControlFor(
         SelectedDevice?.Udid);
     public bool CanStopBluetoothControl => _bluetoothControlEnabled &&
@@ -1098,6 +1108,20 @@ internal sealed class MainViewModel : INotifyPropertyChanged
 
     public MainViewModel()
     {
+        ControlStatus.StatusChanged += (_, snapshot) =>
+        {
+            if (snapshot.Prompt is null && snapshot.Stage is not (ControlStage.Recovering or ControlStage.Failed))
+                return;
+            void ShowStatus()
+            {
+                if (Application.Current?.MainWindow is { } owner)
+                    ReverseControlStatusWindow.Show(owner, ControlStatus,
+                        () => _ = CancelReverseControlAsync(snapshot.Mode));
+            }
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher is null || dispatcher.HasShutdownStarted) return;
+            if (dispatcher.CheckAccess()) ShowStatus(); else dispatcher.BeginInvoke(ShowStatus);
+        };
         _identityResolver = new DeviceIdentityResolver(_reverseBindings);
         _environmentStatus = LocalizationService.Get("StatusCheckingEnvironment");
         _captureStatus = LocalizationService.Get("StatusWaitingDevice");
@@ -1203,7 +1227,6 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             () => _ = ToggleBluetoothControlAsync(), () => CanToggleBluetoothControl);
         ToggleUsbControlCommand = new RelayCommand(
             () => _ = ToggleUsbControlAsync(), () => CanToggleUsbControl);
-        BluetoothControlNoticeWindow.ActiveNoticeClosed += OnBluetoothControlNoticeClosed;
         _bluetoothControl.StatusChanged += (_, _) =>
         {
             void Update()
@@ -1234,8 +1257,9 @@ internal sealed class MainViewModel : INotifyPropertyChanged
                 StopBluetoothControlCommand.NotifyCanExecuteChanged();
                 ToggleBluetoothControlCommand.NotifyCanExecuteChanged();
                 if (_bluetoothControlEnabled && !_bluetoothControlStarting &&
-                    !_bluetoothControlStopping && !_bluetoothControl.IsAdvertising &&
-                    _bluetoothControl.Error is not null)
+                    !_bluetoothControlStopping && _bluetoothControl.Error is not null &&
+                    (!_bluetoothControl.IsAdvertising ||
+                     _bluetoothControl.HasTransportFailure))
                 {
                     ShowReverseControlError(LocalizationService.Get("ReverseControlTransportBluetooth"),
                         LocalizationService.Get("ReverseControlBluetoothFailureAdvice"),
@@ -1249,7 +1273,10 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             else Application.Current?.Dispatcher.BeginInvoke(Update);
         };
         ApplyWirelessSettingsCommand = new RelayCommand(() => _ = RestartWirelessReceiverAsync(),
-            () => _wireless.IsBackendAvailable(_selectedWirelessReceiverBackend) && !IsBusy);
+            // Keep Apply clickable even when an optional backend is missing.
+            // The operation can then show the concrete runtime/package error;
+            // disabling the only action leaves users stuck on a grey button.
+            () => !IsBusy);
         ApplyBluetoothMouseSettingsCommand = new RelayCommand(ApplyBluetoothMouseSettings,
             () => HasPendingBluetoothMouseSettings);
         RefreshWirelessStatus();
@@ -1264,11 +1291,15 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     internal int BluetoothWheelResolutionMultiplier =>
         _bluetoothControl.WheelResolutionMultiplier;
 
-    internal Task SendBluetoothMouseAsync(int dx, int dy, byte buttons = 0, int wheel = 0) =>
-        _bluetoothControl.SendMouseAsync(dx, dy, buttons, wheel);
+    internal Task SendBluetoothMouseAsync(int dx, int dy, byte buttons = 0, int wheel = 0,
+        string? expectedTargetDeviceUdid = null) =>
+        _bluetoothControl.SendMouseAsync(dx, dy, buttons, wheel,
+            expectedTargetDeviceUdid);
 
-    internal Task SendBluetoothKeyboardAsync(byte modifiers, IReadOnlyCollection<byte> usages) =>
-        _bluetoothControl.SendKeyboardAsync(modifiers, usages);
+    internal Task SendBluetoothKeyboardAsync(byte modifiers, IReadOnlyCollection<byte> usages,
+        string? expectedTargetDeviceUdid = null) =>
+        _bluetoothControl.SendKeyboardAsync(modifiers, usages,
+            expectedTargetDeviceUdid);
 
     internal async Task SendUsbKeyboardAsync(IReadOnlyCollection<byte> usages,
         string? targetUdid)
@@ -1493,11 +1524,14 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             return _clipboardHistory.ToList();
     }
 
-    internal Task SendBluetoothSystemShortcutAsync(byte keyboardUsage) =>
-        _bluetoothControl.SendIphoneSystemShortcutAsync(keyboardUsage);
+    internal Task SendBluetoothSystemShortcutAsync(byte keyboardUsage,
+        string? expectedTargetDeviceUdid = null) =>
+        _bluetoothControl.SendIphoneSystemShortcutAsync(keyboardUsage,
+            expectedTargetDeviceUdid);
 
-    internal Task SendBluetoothAppSwitcherAsync() =>
-        _bluetoothControl.SendIphoneAppSwitcherAsync();
+    internal Task SendBluetoothAppSwitcherAsync(
+        string? expectedTargetDeviceUdid = null) =>
+        _bluetoothControl.SendIphoneAppSwitcherAsync(expectedTargetDeviceUdid);
 
     internal Task ReleaseBluetoothControlInputAsync() =>
         _bluetoothControl.ReleaseAllAsync();
@@ -1519,8 +1553,14 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         var controlDeviceUdid = targetDeviceUdid ?? SelectedDevice?.Udid;
         var statusDeviceName = Devices.FirstOrDefault(device =>
             DeviceViewModel.UdidEquals(device.Udid, controlDeviceUdid))?.Name ?? "iPhone";
-        ControlStatus.Report(ControlStatusMode.Bluetooth, ControlStage.CheckingDevice,
-            statusDeviceName, "正在检查设备和绑定状态…");
+        _bluetoothControlStartSucceeded = false;
+        // A new invocation must not inherit a terminal snapshot from the
+        // previous attempt. Keep an already active same-mode workflow intact
+        // so the toolbar can show the startup details without flickering.
+        if (ControlStatus.Current is not { IsTerminal: false, Mode: ControlStatusMode.Bluetooth })
+            ControlStatus.Begin(ControlStatusMode.Bluetooth, statusDeviceName);
+        ControlStatus.Report(ControlStatusMode.Bluetooth, ControlStage.CheckingBinding,
+            statusDeviceName, "正在检查设备绑定器中的蓝牙绑定…");
         if (string.IsNullOrWhiteSpace(controlDeviceUdid) ||
             (!CanEnableBluetoothControlFor(controlDeviceUdid) &&
              !(fromReverseControl && CanStartReverseBluetoothPeripheral)))
@@ -1529,19 +1569,27 @@ internal sealed class MainViewModel : INotifyPropertyChanged
                 "无法启用蓝牙反向控制", "设备未就绪或尚未完成绑定。");
             return;
         }
-        if (!AcknowledgeBluetoothHidReportMapChange())
+        var savedBinding = GetBluetoothControlBinding(controlDeviceUdid);
+        if (!configurationOnly && string.IsNullOrWhiteSpace(savedBinding))
         {
             ControlStatus.Failed(ControlStatusMode.Bluetooth, statusDeviceName,
+                "尚未完成蓝牙设备绑定",
+                "请先在设备绑定器中为当前设备完成蓝牙绑定，然后再启动蓝牙控制。");
+            return;
+        }
+        if (!await AcknowledgeBluetoothHidReportMapChangeAsync())
+        {
+            ControlStatus.Cancelled(ControlStatusMode.Bluetooth, statusDeviceName,
                 "已取消蓝牙反向控制", "用户取消了启动前置确认。");
             return;
         }
         _bluetoothControlDeviceUdid = controlDeviceUdid;
-        var savedBinding = GetBluetoothControlBinding(controlDeviceUdid);
         _reverseControlSetupActive = fromReverseControl && configurationOnly;
         _bluetoothControlNoticePending = !fromReverseControl && _bluetoothNoticePolicy.ShouldShowForDevice(
             controlDeviceUdid);
-        _bluetoothControlInputEnabled = !configurationOnly && savedBinding is not null &&
-            !_bluetoothControlNoticePending;
+        // The status window owns a five-second hand-off. Never allow a new
+        // Bluetooth route to consume input before that hand-off completes.
+        _bluetoothControlInputEnabled = false;
         _bluetoothControlStarting = true;
         OnPropertyChanged(nameof(CanStartBluetoothControl));
         OnPropertyChanged(nameof(CanStopBluetoothControl));
@@ -1559,10 +1607,6 @@ internal sealed class MainViewModel : INotifyPropertyChanged
 
         try
         {
-            ControlStatus.Report(ControlStatusMode.Bluetooth, ControlStage.CheckingPermissions,
-                statusDeviceName, "正在检查设备权限和连接状态…");
-            ControlStatus.Report(ControlStatusMode.Bluetooth, ControlStage.Connecting,
-                statusDeviceName, "正在建立蓝牙控制连接…");
             AddDiagnosticLog(AppLog.Event("bluetooth_control_start_begin",
                 ("device", AppLog.Device(controlDeviceUdid)),
                 ("show_notice", _bluetoothControlNoticePending)));
@@ -1574,22 +1618,27 @@ internal sealed class MainViewModel : INotifyPropertyChanged
                 DeviceViewModel.UdidEquals(device.Udid, controlDeviceUdid))?.Name;
             var started = await _bluetoothControl.StartAsync(controlDeviceUdid,
                 targetDeviceName, preserveExistingBinding, savedBinding,
-                _shutdownCancellation.Token);
-            if (!started)
+                _shutdownCancellation.Token,
+                startupStage => ControlStatus.Report(ControlStatusMode.Bluetooth,
+                    startupStage == BluetoothHidStartupStage.CheckingBluetooth
+                        ? ControlStage.CheckingBluetooth
+                        : ControlStage.SwitchingBluetoothPeripheral,
+                    statusDeviceName,
+                    startupStage == BluetoothHidStartupStage.CheckingBluetooth
+                        ? "正在检查电脑蓝牙是否开启并支持 BLE…"
+                        : "正在将电脑蓝牙硬件切换至 HID 外设模式…"));
+            if (!started || _bluetoothControl.HasTransportFailure)
             {
-                var showFailureNotice = _bluetoothControlNoticePending;
-                _bluetoothControlEnabled = false;
-                _bluetoothControlConnected = false;
-                ResetBluetoothControlInputState();
-                NotifyBluetoothControlStateChanged();
+                var failureDetails = _bluetoothControl.Error ?? _bluetoothControl.Status;
+                await CleanUpFailedBluetoothStartAsync();
                 AddDiagnosticLog(AppLog.Event("bluetooth_control_start_complete",
                     ("success", false), ("advertising", false),
-                    ("connected", false), ("error", _bluetoothControl.Error)));
+                    ("connected", false), ("error", failureDetails)));
                 DiagnosticLogger.ReverseControlError("bluetooth", "start_failed",
-                    ("error", _bluetoothControl.Error));
+                    ("error", failureDetails));
                 ShowReverseControlError(LocalizationService.Get("ReverseControlTransportBluetooth"),
                     LocalizationService.Get("ReverseControlBluetoothFailureAdvice"),
-                    technicalDetails: _bluetoothControl.Error ?? _bluetoothControl.Status);
+                    technicalDetails: failureDetails);
                 return;
             }
 
@@ -1598,20 +1647,15 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             // the HID reports, so remain available until explicitly stopped.
             _bluetoothControlEnabled = true;
             _bluetoothControlConnected = _bluetoothControl.IsConnected;
-            ControlStatus.Report(ControlStatusMode.Bluetooth, ControlStage.InitializingServices,
-                statusDeviceName, "正在初始化触控和输入服务…");
+            ControlStatus.Report(ControlStatusMode.Bluetooth,
+                ControlStage.WaitingForPhoneConnection, statusDeviceName,
+                "蓝牙外设已就绪，请按照下方步骤在手机上完成连接…");
             var bluetoothIdentity = _identityResolver.Resolve(Devices.FirstOrDefault(device =>
                 DeviceViewModel.UdidEquals(device.Udid, controlDeviceUdid)));
             if (!configurationOnly && !string.IsNullOrWhiteSpace(bluetoothIdentity.AppleUdid))
                 _reverseInputRouter.Begin(bluetoothIdentity.AppleUdid,
                     ReverseControlMode.Bluetooth);
             NotifyBluetoothControlStateChanged();
-            if (!_bluetoothControlConnected && _bluetoothControlNoticePending &&
-                Application.Current?.MainWindow is { } owner)
-                BluetoothControlNoticeWindow.ShowWaiting(owner,
-                    _bluetoothControl.SuggestedDeviceName);
-            else if (!_bluetoothControlConnected && _bluetoothControlNoticePending)
-                AllowBluetoothControlInput();
             AddUiLog(LocalizationService.Get(_bluetoothControlConnected
                 ? "BluetoothControlConnected" : "BluetoothControlWaiting"));
             AddDiagnosticLog(AppLog.Event("bluetooth_control_start_complete",
@@ -1620,31 +1664,20 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             DiagnosticLogger.ReverseControl("bluetooth", "start_complete",
                 ("advertising", _bluetoothControl.IsAdvertising),
                 ("connected", _bluetoothControlConnected));
-            ControlStatus.Report(ControlStatusMode.Bluetooth, ControlStage.StartingInputRouter,
-                statusDeviceName, "正在准备鼠标、键盘和系统控制…");
-            ControlStatus.Ready(ControlStatusMode.Bluetooth, statusDeviceName,
-                _bluetoothControlConnected ? "反向控制已经准备就绪" : "蓝牙控制已启动，正在等待设备连接");
+            _bluetoothControlStartSucceeded = true;
             // Binding discovery and its modeless picker must not extend the
             // Bluetooth start command's UI-critical path.
             _ = EnsureBluetoothControlBindingAsync();
         }
         catch (OperationCanceledException)
         {
-            _bluetoothControlEnabled = false;
-            _bluetoothControlConnected = false;
-            _reverseInputRouter.Stop();
-            ResetBluetoothControlInputState();
-            NotifyBluetoothControlStateChanged();
+            await CleanUpFailedBluetoothStartAsync();
         }
         catch (Exception error)
         {
             ControlStatus.Failed(ControlStatusMode.Bluetooth, statusDeviceName,
                 "无法启用蓝牙反向控制", error.Message);
-            var showFailureNotice = _bluetoothControlNoticePending;
-            _bluetoothControlEnabled = false;
-            _bluetoothControlConnected = false;
-            ResetBluetoothControlInputState();
-            NotifyBluetoothControlStateChanged();
+            await CleanUpFailedBluetoothStartAsync();
             AddDiagnosticLog(AppLog.Event("bluetooth_control_start_failed",
                 ("error", AppLog.Error(error))));
             DiagnosticLogger.ReverseControlError("bluetooth", "start_failed",
@@ -1666,6 +1699,28 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    private async Task CleanUpFailedBluetoothStartAsync()
+    {
+        _bluetoothControlEnabled = false;
+        _reverseControlSetupActive = false;
+        _bluetoothControlConnected = false;
+        _bluetoothControlCalibrated = false;
+        ResetBluetoothControlInputState();
+        if (_reverseInputRouter.Mode == ReverseControlMode.Bluetooth)
+            _reverseInputRouter.Stop();
+        ControlStatus.ResolvePrompt(new(ControlPromptAction.Cancel));
+        try
+        {
+            await _bluetoothControl.StopAsync();
+        }
+        catch (Exception error)
+        {
+            AddDiagnosticLog(AppLog.Event("bluetooth_control_start_cleanup_failed",
+                ("error", AppLog.Error(error))));
+        }
+        NotifyBluetoothControlStateChanged();
+    }
+
     private bool CanStartReverseBluetoothPeripheral =>
         !_bluetoothControlEnabled && !_bluetoothControlStarting &&
         !_bluetoothControlStopping && !IsBusy && !_usbControlEnabled &&
@@ -1679,7 +1734,11 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     {
         await EnableBluetoothControlAsync(udid, fromReverseControl: true,
             configurationOnly: true);
-        return _bluetoothControl.IsAdvertising;
+        // Do not re-read IsAdvertising here. The WinRT AdvertisementStatus
+        // property can lag the Started event that made EnableBluetooth...()
+        // succeed, which used to report a false startup failure to the
+        // device-binding dialog on otherwise healthy adapters.
+        return _bluetoothControlStartSucceeded && !_bluetoothControl.HasTransportFailure;
     }
     internal Task StopBluetoothPeripheralConfigurationAsync() =>
         DisableBluetoothControlAsync();
@@ -1705,21 +1764,28 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         return true;
     }
 
-    private bool AcknowledgeBluetoothHidReportMapChange()
+    private async Task<bool> AcknowledgeBluetoothHidReportMapChangeAsync()
     {
         if (Application.Current is not App app ||
             app.UpdateSettings.BluetoothHidReportMapAcknowledgedVersion >=
                 BluetoothHidProtocol.ReportMapVersion)
             return true;
-        if (Application.Current.MainWindow is not { } owner) return false;
-        BluetoothControlNoticeWindow.ShowReportMapChanged(owner,
-            _bluetoothControl.SuggestedDeviceName, () =>
-            {
-                app.UpdateSettings.BluetoothHidReportMapAcknowledgedVersion =
-                    BluetoothHidProtocol.ReportMapVersion;
-                if (!app.SaveUpdateSettings())
-                    AddDiagnosticLog(AppLog.Event("bluetooth_hid_report_map_ack_save_failed"));
-            });
+        var result = await ControlStatus.RequestPromptAsync(new(
+            ControlPromptType.UserActionRequired,
+            LocalizationService.Get("BluetoothControlReportMapChangedTitle"),
+            LocalizationService.Get("BluetoothControlReportMapChangedBody"),
+            LocalizationService.Get("BluetoothControlReportMapChangedConfirm"),
+            LocalizationService.Get("Cancel"),
+            TechnicalDetails: LocalizationService.Get("BluetoothControlReportMapChangedDetail")),
+            _shutdownCancellation.Token);
+        if (result.Action == ControlPromptAction.Primary)
+        {
+            app.UpdateSettings.BluetoothHidReportMapAcknowledgedVersion =
+                BluetoothHidProtocol.ReportMapVersion;
+            if (!app.SaveUpdateSettings())
+                AddDiagnosticLog(AppLog.Event("bluetooth_hid_report_map_ack_save_failed"));
+            return true;
+        }
         AddDiagnosticLog(AppLog.Event("bluetooth_hid_report_map_repair_required",
             ("version", BluetoothHidProtocol.ReportMapVersion)));
         return false;
@@ -1778,10 +1844,18 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             if (clients.Count == 0) return;
             if (!_bluetoothControlEnabled || !DeviceViewModel.UdidEquals(
                     _bluetoothControlDeviceUdid, targetUdid)) return;
-            if (savedBinding is not null && clients.Any(client =>
-                    string.Equals(client.Id, savedBinding,
-                        StringComparison.OrdinalIgnoreCase)))
+            if (savedBinding is not null)
             {
+                if (!clients.Any(client => string.Equals(client.Id, savedBinding,
+                        StringComparison.OrdinalIgnoreCase)))
+                {
+                    // The connected-device enumeration also includes ordinary
+                    // Bluetooth HID peripherals such as the user's mouse.
+                    // A saved iPhone/iPad binding must remain authoritative;
+                    // wait for it to reconnect instead of prompting to bind an
+                    // unrelated peripheral.
+                    return;
+                }
                 // The GATT subscription event can arrive before the route
                 // refresh publishes TargetClientId. Restore the persisted
                 // client directly instead of asking the user to bind again.
@@ -1792,7 +1866,6 @@ internal sealed class MainViewModel : INotifyPropertyChanged
                             _bluetoothControlDeviceUdid, targetUdid)) return;
                     _bluetoothControlConnected =
                         _bluetoothControl.IsTargetClientConnected;
-                    _bluetoothControlInputEnabled = !_bluetoothControlNoticePending;
                     NotifyBluetoothControlStateChanged();
                     if (_bluetoothControlConnected)
                         await CompleteBluetoothConnectionAsync();
@@ -1800,17 +1873,30 @@ internal sealed class MainViewModel : INotifyPropertyChanged
                 return;
             }
             clients = clients.Select(MarkBluetoothClientBinding).ToArray();
-            var owner = Application.Current?.MainWindow;
-            if (owner is null) return;
             var targetName = Devices.FirstOrDefault(device =>
                 DeviceViewModel.UdidEquals(device.Udid, targetUdid))?.DisplayName ?? targetUdid;
             if (!_bluetoothBindingPromptedTargets.Add(targetUdid)) return;
-            BluetoothControlNoticeWindow.TryCloseActive();
-            var selected = await (await owner.Dispatcher.InvokeAsync(() =>
-                BluetoothClientBindingWindow.ShowAsync(owner, targetName, clients,
-                    _bluetoothControl.TargetClientId,
-                    RefreshBluetoothBindingClientsAsync,
-                    UnbindBluetoothControlBinding)));
+            var options = clients.Select(client => new ControlPromptOption(
+                client.Id,
+                client.DisplayName,
+                string.Join(" · ", new[]
+                {
+                    client.ConnectionTimeText,
+                    client.IdentifierText,
+                    client.IsBound ? client.BindingText : null,
+                }.Where(value => !string.IsNullOrWhiteSpace(value))))).ToArray();
+            var prompt = new ControlPrompt(
+                ControlPromptType.Selection,
+                LocalizationService.Get("BluetoothClientBindingTitle"),
+                LocalizationService.Format("BluetoothClientBindingTargetFormat", targetName),
+                LocalizationService.Get("BluetoothClientBindingConfirm"),
+                LocalizationService.Get("Cancel"),
+                TechnicalDetails: LocalizationService.Get("BluetoothClientBindingHint"),
+                Options: options);
+            var selectedResult = await ControlStatus.RequestPromptAsync(prompt,
+                _shutdownCancellation.Token);
+            var selected = selectedResult.Action == ControlPromptAction.Primary
+                ? selectedResult.Value : null;
             if (!_bluetoothControlEnabled || !DeviceViewModel.UdidEquals(
                     _bluetoothControlDeviceUdid, targetUdid) ||
                 string.IsNullOrWhiteSpace(selected) ||
@@ -1825,10 +1911,20 @@ internal sealed class MainViewModel : INotifyPropertyChanged
                 return;
             }
             _bluetoothControlConnected = _bluetoothControl.IsTargetClientConnected;
-            _bluetoothControlInputEnabled = !_bluetoothControlNoticePending;
             NotifyBluetoothControlStateChanged();
             if (_bluetoothControlConnected)
                 await CompleteBluetoothConnectionAsync();
+        }
+        catch (OperationCanceledException) when (_shutdownCancellation.IsCancellationRequested)
+        {
+            // Normal application shutdown ends the modeless binding poll.
+        }
+        catch (Exception error)
+        {
+            AddDiagnosticLog(AppLog.Event("bluetooth_control_binding_refresh_failed",
+                ("error", AppLog.Error(error))));
+            DiagnosticLogger.ReverseControlError("bluetooth",
+                "binding_refresh_failed", ("error", AppLog.Error(error)));
         }
         finally
         {
@@ -1898,7 +1994,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     internal async Task DisableBluetoothControlAsync()
     {
         if (_bluetoothControlStopping ||
-            (!_bluetoothControlEnabled && !_bluetoothControl.IsAdvertising)) return;
+            (!_bluetoothControlEnabled && !_bluetoothControlStarting &&
+             !_bluetoothControl.IsAdvertising)) return;
         _bluetoothControlStopping = true;
         var controlDeviceUdid = _bluetoothControlDeviceUdid;
         AddDiagnosticLog(AppLog.Event("bluetooth_control_stop_begin",
@@ -1917,7 +2014,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             if (_reverseInputRouter.Mode == ReverseControlMode.Bluetooth)
                 _reverseInputRouter.Stop();
             NotifyBluetoothControlStateChanged();
-            BluetoothControlNoticeWindow.TryCloseActive();
+            ControlStatus.ResolvePrompt(new(ControlPromptAction.Cancel));
             if (!string.IsNullOrWhiteSpace(controlDeviceUdid))
                 _bluetoothBindingPromptedTargets.Remove(controlDeviceUdid);
             try { await _bluetoothControl.ReleaseAllAsync(); }
@@ -1929,6 +2026,16 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             await _bluetoothControl.StopAsync();
             AddDiagnosticLog(AppLog.Event("bluetooth_control_stop_complete"));
             DiagnosticLogger.ReverseControl("bluetooth", "stop_complete");
+        }
+        catch (Exception error)
+        {
+            // Automatic disconnect handling invokes this method without an
+            // awaiting caller. Contain shutdown failures here so a broken
+            // Bluetooth stack cannot become an unobserved process-level task.
+            AddDiagnosticLog(AppLog.Event("bluetooth_control_stop_failed",
+                ("error", AppLog.Error(error))));
+            DiagnosticLogger.ReverseControlError("bluetooth", "stop_failed",
+                ("error", AppLog.Error(error)));
         }
         finally
         {
@@ -1949,17 +2056,29 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         _bluetoothCalibrationInProgress = true;
         try
         {
+            var statusDeviceName = Devices.FirstOrDefault(device =>
+                DeviceViewModel.UdidEquals(device.Udid,
+                    _bluetoothControlDeviceUdid))?.Name ?? "iPhone";
+            ControlStatus.Report(ControlStatusMode.Bluetooth,
+                ControlStage.VerifyingTouch, statusDeviceName,
+                "手机已连接，正在检查 HID 触控通道是否正常…");
             var calibrated = await CalibrateBluetoothControlAsync();
-            if (!_bluetoothControlEnabled || !_bluetoothControl.IsConnected ||
-                !calibrated) return;
+            if (!_bluetoothControlEnabled) return;
+            if (!_bluetoothControl.IsConnected)
+            {
+                ControlStatus.Report(ControlStatusMode.Bluetooth,
+                    ControlStage.WaitingForPhoneConnection, statusDeviceName,
+                    "手机连接已断开，请重新完成蓝牙连接…");
+                return;
+            }
+            if (!calibrated)
+            {
+                ControlStatus.Failed(ControlStatusMode.Bluetooth, statusDeviceName,
+                    "蓝牙触控检查未通过",
+                    "HID 鼠标通道已连接，但触控路由校验失败。");
+                return;
+            }
             _bluetoothControlCalibrated = true;
-            // The integrated reverse-control wizard intentionally does not
-            // show the legacy waiting notice. Once the selected stable client
-            // is bound, allow input directly after calibration.
-            if (!_bluetoothControlNoticePending && !_reverseControlSetupActive)
-                _bluetoothControlInputEnabled =
-                    !string.IsNullOrWhiteSpace(_bluetoothControlDeviceUdid) &&
-                    GetBluetoothControlBinding(_bluetoothControlDeviceUdid) is not null;
             NotifyBluetoothControlStateChanged();
             AddUiLog(LocalizationService.Get("BluetoothControlConnected"));
             AddDiagnosticLog(AppLog.Event("bluetooth_control_connected",
@@ -1967,11 +2086,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             DiagnosticLogger.ReverseControl("bluetooth", "connected",
                 ("device", AppLog.Device(_bluetoothControlDeviceUdid)),
                 ("input_enabled", _bluetoothControlInputEnabled));
-            if (_bluetoothControlNoticePending && !_bluetoothControlInputEnabled &&
-                Application.Current?.MainWindow is { } owner)
-                BluetoothControlNoticeWindow.ShowConnected(owner);
-            else if (_bluetoothControlNoticePending)
-                AllowBluetoothControlInput();
+            // The connection status window owns a fixed five-second hand-off.
+            // Keep Raw Input and all HID sends disabled until that independent
+            // deadline elapses, so no movement recorded before/during the
+            // status window can leak into the live control route.
+            ControlStatus.Ready(ControlStatusMode.Bluetooth, statusDeviceName);
+            StartBluetoothInputCountdownFallback();
         }
         catch (Exception error)
         {
@@ -2042,6 +2162,13 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     internal Task StartBluetoothControlAsync(string? targetDeviceUdid = null) =>
         EnableBluetoothControlAsync(targetDeviceUdid);
 
+    internal Task CancelReverseControlAsync(ControlStatusMode mode) => mode switch
+    {
+        ControlStatusMode.Bluetooth => DisableBluetoothControlAsync(),
+        ControlStatusMode.Wireless => DisableWirelessControlAsync(),
+        _ => DisableUsbControlAsync(),
+    };
+
     internal async Task ToggleWiredControlAsync()
     {
         if (_usbControlEnabled) await DisableUsbControlAsync();
@@ -2090,8 +2217,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         var boundUdid = device is null ? null : _identityResolver.Resolve(device).AppleUdid;
         if (device is null || string.IsNullOrWhiteSpace(boundUdid) || !CanEnableWirelessControlFor(device))
         { ControlStatus.Failed(ControlStatusMode.Wireless, device?.Name ?? "iPhone", "无法启用无线反向控制", "设备未就绪或尚未完成绑定。"); return; }
-        if (!ConfirmReverseControlPrerequisites(wireless: true))
-        { ControlStatus.Failed(ControlStatusMode.Wireless, device.Name, "已取消无线反向控制", "用户取消了启动前置确认。"); return; }
+            if (!await ConfirmReverseControlPrerequisitesAsync(wireless: true))
+        { ControlStatus.Cancelled(ControlStatusMode.Wireless, device.Name, "已取消无线反向控制", "用户取消了启动前置确认。"); return; }
         _usbControlStarting = true;
         _wirelessStartupTerminated = false;
         ControlStatus.Report(ControlStatusMode.Wireless, ControlStage.CheckingPermissions, device.Name, "正在检查设备权限和连接状态…");
@@ -2315,7 +2442,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     private async Task DisableWirelessControlAsync()
     {
         if (_usbControlStopping) return;
-        if (!_wirelessControlEnabled && _wirelessTouchBridge is null) return;
+        if (!_wirelessControlEnabled && !_usbControlStarting &&
+            _wirelessTouchBridge is null) return;
         _usbControlStopping = true;
         NotifyUsbControlStateChanged();
         var bridge = _wirelessTouchBridge;
@@ -2339,7 +2467,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
                 ("error", AppLog.Error(error)));
             ShowReverseControlError(LocalizationService.Get("ReverseControlTransportWireless"),
                 LocalizationService.Get("ReverseControlStopFailureAdvice"),
-                "ReverseControlStopErrorTitle", AppLog.Error(error));
+                "ReverseControlStopErrorTitle", AppLog.Error(error),
+                retryOperation: DisableWirelessControlAsync);
         }
         finally
         {
@@ -2358,8 +2487,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         ControlStatus.Report(ControlStatusMode.Usb, ControlStage.CheckingDevice, device?.Name ?? "iPhone", "正在检查设备和绑定状态…");
         if (!CanEnableUsbControlFor(device))
         { ControlStatus.Failed(ControlStatusMode.Usb, device?.Name ?? "iPhone", "无法启用 USB 反向控制", "设备未就绪或尚未完成绑定。"); return; }
-        if (!ConfirmReverseControlPrerequisites(wireless: false))
-        { ControlStatus.Failed(ControlStatusMode.Usb, device?.Name ?? "iPhone", "已取消 USB 反向控制", "用户取消了启动前置确认。"); return; }
+        if (!await ConfirmReverseControlPrerequisitesAsync(wireless: false))
+        { ControlStatus.Cancelled(ControlStatusMode.Usb, device?.Name ?? "iPhone", "已取消 USB 反向控制", "用户取消了启动前置确认。"); return; }
         if (device is null) return;
         var boundUsbUdid = GetUsbControlBinding(device.Udid);
         if (string.IsNullOrWhiteSpace(boundUsbUdid))
@@ -2374,28 +2503,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         NotifyUsbControlStateChanged();
         var bridge = new UsbTouchBridgeHost();
         _usbTouchBridge = bridge;
-        bridge.StatusChanged += (_, bridgeEvent) =>
-        {
-            if (!ReferenceEquals(_usbTouchBridge, bridge) || cancellationToken.IsCancellationRequested) return;
-            if (bridgeEvent.EventName == "clipboard_text")
-            {
-                HandleClipboardTextFromDevice(bridgeEvent.Text);
-                return;
-            }
-            LogBridgeEvent("usb", bridgeEvent);
-            UpdateReverseControlStartupStatus(LocalizationService.Get("ReverseControlTransportWired"), ControlStatusMode.Usb, bridgeEvent);
-            if (bridgeEvent.EventName is not ("error" or "status") ||
-                (bridgeEvent.EventName == "status" && bridgeEvent.Code != "terminated")) return;
-            _usbControlConnected = false;
-            ControlStatus.Report(ControlStatusMode.Usb, ControlStage.Recovering, device.Name, "检测到控制通道暂时中断，正在尝试自动重新连接…");
-            _usbControlStatus = LocalizationService.Get("ReverseControlUsbConnecting");
-            if (Application.Current?.Dispatcher is { } dispatcher)
-                dispatcher.BeginInvoke(async () =>
-                {
-                    if (ReferenceEquals(_usbTouchBridge, bridge) && !_usbControlStopping)
-                        await RecoverUsbControlAsync();
-                });
-        };
+        AttachUsbBridgeEvents(bridge, device, cancellationToken);
         var lockdownGateHeld = false;
         try
         {
@@ -2464,15 +2572,25 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private bool ConfirmReverseControlPrerequisites(bool wireless)
+    private async Task<bool> ConfirmReverseControlPrerequisitesAsync(bool wireless)
     {
         var acknowledged = wireless
             ? _wirelessControlPrerequisiteAcknowledged
             : _wiredControlPrerequisiteAcknowledged;
         if (acknowledged) return true;
 
-        if (!AppPromptWindow.ConfirmReverseControlPrerequisite(
-                Application.Current.MainWindow, wireless))
+        var result = await ControlStatus.RequestPromptAsync(new(
+            ControlPromptType.Confirmation,
+            LocalizationService.Get(wireless
+                ? "ReverseControlPrerequisiteWirelessTitle"
+                : "ReverseControlPrerequisiteWiredTitle"),
+            LocalizationService.Get(wireless
+                ? "ReverseControlPrerequisiteWirelessBody"
+                : "ReverseControlPrerequisiteWiredBody"),
+            LocalizationService.Get("Continue"),
+            LocalizationService.Get("Cancel"),
+            IsBlocking: true), _shutdownCancellation.Token);
+        if (result.Action != ControlPromptAction.Primary)
         {
             DiagnosticLogger.ReverseControl(wireless ? "wireless" : "usb",
                 "prerequisites_cancelled");
@@ -2489,6 +2607,40 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     private static string GetUsbDirectControlBridgePath()
     {
         return Path.Combine(AppContext.BaseDirectory, "tools", "iUsbBridge.exe");
+    }
+
+    private void AttachUsbBridgeEvents(UsbTouchBridgeHost bridge,
+        DeviceViewModel device, CancellationToken cancellationToken)
+    {
+        bridge.StatusChanged += (_, bridgeEvent) =>
+        {
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher is null || dispatcher.HasShutdownStarted) return;
+            dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!ReferenceEquals(_usbTouchBridge, bridge) || _disposed ||
+                    cancellationToken.IsCancellationRequested) return;
+                if (bridgeEvent.EventName == "clipboard_text")
+                {
+                    HandleClipboardTextFromDevice(bridgeEvent.Text);
+                    return;
+                }
+                LogBridgeEvent("usb", bridgeEvent);
+                UpdateReverseControlStartupStatus(
+                    LocalizationService.Get("ReverseControlTransportWired"),
+                    ControlStatusMode.Usb, bridgeEvent);
+                if (bridgeEvent.EventName is not ("error" or "status") ||
+                    (bridgeEvent.EventName == "status" && bridgeEvent.Code != "terminated"))
+                    return;
+                if (_usbControlStopping || !_usbControlEnabled) return;
+                _usbControlConnected = false;
+                ControlStatus.Report(ControlStatusMode.Usb, ControlStage.Recovering,
+                    device.Name, "检测到控制通道暂时中断，正在尝试自动重新连接…");
+                _usbControlStatus = LocalizationService.Get("ReverseControlUsbConnecting");
+                NotifyUsbControlStateChanged();
+                _ = RecoverUsbControlAsync();
+            }));
+        };
     }
 
     private static string GetUsbControlFailureMessage(Exception error,
@@ -2646,7 +2798,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     }
 
     private void ShowReverseControlError(string transport, string? detail,
-        string titleKey = "ReverseControlStartErrorTitle", string? technicalDetails = null)
+        string titleKey = "ReverseControlStartErrorTitle", string? technicalDetails = null,
+        Func<Task>? retryOperation = null)
     {
         if (Interlocked.Exchange(ref _reverseControlErrorPromptInFlight, 1) != 0)
             return;
@@ -2660,9 +2813,22 @@ internal sealed class MainViewModel : INotifyPropertyChanged
                 ControlStatus.FailCurrent(detail ?? "反向控制失败", technicalDetails);
                 if (!string.IsNullOrWhiteSpace(technicalDetails))
                     ControlStatus.AddDiagnostic(detail ?? "反向控制失败", technicalDetails, "Error");
+                var mode = ControlStatus.Current?.Mode ?? ControlStatusMode.Usb;
+                Action retry = () =>
+                {
+                    ControlStatus.Begin(mode, SelectedDevice?.Name ?? "iPhone");
+                    _ = retryOperation?.Invoke() ?? mode switch
+                    {
+                        ControlStatusMode.Bluetooth => EnableBluetoothControlAsync(),
+                        ControlStatusMode.Wireless => EnableWirelessControlAsync(),
+                        _ => EnableUsbControlAsync(),
+                    };
+                };
                 ReverseControlStatusWindow.Show(
                     Application.Current?.MainWindow ?? throw new InvalidOperationException("Main window unavailable"),
-                    ControlStatus);
+                    ControlStatus,
+                    cancel: () => _ = CancelReverseControlAsync(mode),
+                    retry: retry);
             }
             finally
             {
@@ -2700,7 +2866,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             await DisableWirelessControlAsync();
             return;
         }
-        if (_usbControlStopping || (!_usbControlEnabled && _usbTouchBridge is null)) return;
+        if (_usbControlStopping || (!_usbControlEnabled && !_usbControlStarting &&
+            _usbTouchBridge is null)) return;
         _usbControlStopping = true;
         _usbControlEnabled = false;
         _usbControlConnected = false;
@@ -2731,7 +2898,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
                 ("error", AppLog.Error(error)));
             ShowReverseControlError(LocalizationService.Get("ReverseControlTransportWired"),
                 LocalizationService.Get("ReverseControlStopFailureAdvice"),
-                "ReverseControlStopErrorTitle", AppLog.Error(error));
+                "ReverseControlStopErrorTitle", AppLog.Error(error),
+                retryOperation: DisableUsbControlAsync);
         }
         finally
         {
@@ -2805,45 +2973,35 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             await Task.Delay(attempts * 1000, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (!_usbControlEnabled || _usbControlStopping ||
-                !DeviceViewModel.UdidEquals(_usbControlDeviceUdid, deviceUdid) ||
-                !DeviceViewModel.UdidEquals(GetUsbControlBinding(deviceUdid), boundUsbUdid)) return;
+                !DeviceViewModel.UdidEquals(_usbControlDeviceUdid, deviceUdid)) return;
+            if (!DeviceViewModel.UdidEquals(GetUsbControlBinding(deviceUdid), boundUsbUdid))
+            {
+                var reason = LocalizationService.Get("ReverseControlUsbBindingChanged");
+                _usbControlEnabled = _usbControlConnected = false;
+                _usbControlFailed = true;
+                _usbControlDeviceUdid = null;
+                _usbControlStatus = LocalizationService.Format(
+                    "ReverseControlUsbFailedFormat", reason);
+                ControlStatus.Failed(ControlStatusMode.Usb, device.Name,
+                    "自动重连失败", reason);
+                NotifyUsbControlStateChanged();
+                return;
+            }
             var newBridge = new UsbTouchBridgeHost();
             _usbTouchBridge = newBridge;
             var lockdownGateHeld = false;
             try
             {
-                newBridge.StatusChanged += (_, bridgeEvent) =>
-                {
-                    if (!ReferenceEquals(_usbTouchBridge, newBridge) || cancellationToken.IsCancellationRequested) return;
-                    if (bridgeEvent.EventName == "clipboard_text")
-                    {
-                        HandleClipboardTextFromDevice(bridgeEvent.Text);
-                        return;
-                    }
-                    LogBridgeEvent("usb", bridgeEvent);
-                    UpdateReverseControlStartupStatus(
-                        LocalizationService.Get("ReverseControlTransportWired"),
-                        ControlStatusMode.Usb, bridgeEvent);
-                    if (bridgeEvent.EventName is not ("error" or "status") ||
-                        (bridgeEvent.EventName == "status" &&
-                         bridgeEvent.Code != "terminated")) return;
-                    _usbControlConnected = false;
-                    ControlStatus.Report(ControlStatusMode.Usb,
-                        ControlStage.Recovering, device.Name,
-                        "检测到控制通道暂时中断，正在尝试自动重新连接…");
-                    _usbControlStatus = LocalizationService.Get("ReverseControlUsbConnecting");
-                    if (Application.Current?.Dispatcher is { } dispatcher)
-                        dispatcher.BeginInvoke(async () =>
-                        {
-                            if (ReferenceEquals(_usbTouchBridge, newBridge) && !_usbControlStopping)
-                                await RecoverUsbControlAsync();
-                        });
-                };
+                AttachUsbBridgeEvents(newBridge, device, cancellationToken);
                 await _lockdownHandshakeGate.WaitAsync(cancellationToken);
                 lockdownGateHeld = true;
                 await newBridge.StartAsync(UsbTouchTransport.Usb, boundUsbUdid,
                     bridgePath, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!DeviceViewModel.UdidEquals(GetUsbControlBinding(deviceUdid),
+                        boundUsbUdid))
+                    throw new InvalidOperationException(
+                        LocalizationService.Get("ReverseControlUsbBindingChanged"));
                 _usbControlConnected = true;
                 _reverseInputRouter.Begin(boundUsbUdid, ReverseControlMode.Usb);
                 StartClipboardPolling(newBridge);
@@ -2938,19 +3096,103 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         ToggleBluetoothControlCommand.NotifyCanExecuteChanged();
     }
 
-    private void OnBluetoothControlNoticeClosed(object? sender, EventArgs e)
+    private async Task ShowBluetoothWaitingPromptAsync()
     {
-        void Update()
+        if (!_bluetoothControlEnabled || _bluetoothControlConnected || !_bluetoothControlNoticePending)
+            return;
+        if (Interlocked.Exchange(ref _bluetoothWaitingPromptInFlight, 1) != 0) return;
+        try
         {
-            if (_disposed || !_bluetoothControlEnabled ||
-                !_bluetoothControlNoticePending) return;
-            if (GetBluetoothControlBinding(_bluetoothControlDeviceUdid ?? string.Empty)
-                is not null)
-                AllowBluetoothControlInput();
+            await ControlStatus.RequestPromptAsync(new(
+                ControlPromptType.UserActionRequired,
+                LocalizationService.Get("BluetoothControlWaitingTitle"),
+                LocalizationService.Get("BluetoothControlWaitingBody"),
+                LocalizationService.Get("Close"),
+                IsBlocking: false,
+                TechnicalDetails: LocalizationService.Format(
+                    "BluetoothControlWaitingTargetFormat",
+                    _bluetoothControl.SuggestedDeviceName ?? Environment.MachineName)),
+                _shutdownCancellation.Token);
         }
+        finally { Volatile.Write(ref _bluetoothWaitingPromptInFlight, 0); }
+    }
 
-        if (Application.Current?.Dispatcher.CheckAccess() == true) Update();
-        else Application.Current?.Dispatcher.BeginInvoke(Update);
+    private async Task ShowBluetoothConnectedPromptAsync()
+    {
+        if (!_bluetoothControlEnabled || !_bluetoothControlConnected || !_bluetoothControlNoticePending)
+            return;
+        if (Interlocked.Exchange(ref _bluetoothConnectedPromptInFlight, 1) != 0) return;
+        try
+        {
+            var result = await ControlStatus.RequestPromptAsync(new(
+                ControlPromptType.Information,
+                LocalizationService.Get("BluetoothControlPromptTitle"),
+                LocalizationService.Format("BluetoothControlPromptBodyFormat",
+                    KeyboardShortcut.FromSettings(
+                        (Application.Current as App)?.UpdateSettings ?? new(),
+                        BluetoothShortcutAction.BluetoothControl).DisplayText),
+                LocalizationService.Get("Continue"),
+                IsBlocking: false,
+                TechnicalDetails: LocalizationService.Get("BluetoothControlPromptDetail")),
+                _shutdownCancellation.Token);
+            if (result.Action == ControlPromptAction.Primary || result.Action == ControlPromptAction.Cancel)
+                AllowBluetoothControlInput();
+            ControlStatus.Ready(ControlStatusMode.Bluetooth,
+                Devices.FirstOrDefault(device => DeviceViewModel.UdidEquals(
+                    device.Udid, _bluetoothControlDeviceUdid))?.Name ?? "iPhone");
+        }
+        finally { Volatile.Write(ref _bluetoothConnectedPromptInFlight, 0); }
+    }
+
+    internal void BeginBluetoothControlInputAfterStatusCountdown()
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is not null && !dispatcher.CheckAccess())
+        {
+            // The fallback countdown runs on a pool thread. WPF windows and
+            // their Dispatcher-owned state must be closed and updated on the
+            // UI thread; otherwise the transition throws and leaves the
+            // dialog visible with input still disabled.
+            _ = dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.Send,
+                new Action(BeginBluetoothControlInputAfterStatusCountdown));
+            return;
+        }
+        if (!_bluetoothControlEnabled || !_bluetoothControlConnected ||
+            !_bluetoothControlCalibrated || _reverseControlSetupActive)
+            return;
+        // The model fallback can win the race with the status window's
+        // DispatcherTimer. Close the window first so live input never starts
+        // while the UI still shows the final countdown second.
+        ReverseControlStatusWindow.CloseActive();
+        AllowBluetoothControlInput();
+        NotifyBluetoothControlStateChanged();
+    }
+
+    private void StartBluetoothInputCountdownFallback()
+    {
+        _bluetoothInputCountdownCts?.Cancel();
+        _bluetoothInputCountdownCts?.Dispose();
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(
+            _shutdownCancellation.Token);
+        _bluetoothInputCountdownCts = cts;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(false);
+                BeginBluetoothControlInputAfterStatusCountdown();
+            }
+            catch (OperationCanceledException) { }
+            finally
+            {
+                if (ReferenceEquals(_bluetoothInputCountdownCts, cts))
+                {
+                    _bluetoothInputCountdownCts = null;
+                    cts.Dispose();
+                }
+            }
+        });
     }
 
     private void AllowBluetoothControlInput()
@@ -2966,6 +3208,9 @@ internal sealed class MainViewModel : INotifyPropertyChanged
 
     private void ResetBluetoothControlInputState()
     {
+        _bluetoothInputCountdownCts?.Cancel();
+        _bluetoothInputCountdownCts?.Dispose();
+        _bluetoothInputCountdownCts = null;
         _bluetoothControlInputEnabled = false;
         _bluetoothControlNoticePending = false;
         _bluetoothControlDeviceUdid = null;
@@ -2980,10 +3225,9 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         }
         if (!_bluetoothControlInputEnabled)
         {
-            _reverseControlSetupActive = false;
-            _bluetoothControlInputEnabled = true;
-            NotifyBluetoothControlStateChanged();
-            if (_bluetoothControlConnected) await CompleteBluetoothConnectionAsync();
+            // The independent status countdown owns this transition. A
+            // second toolbar/shortcut press during the countdown must not
+            // bypass it and start sending historical input immediately.
             return;
         }
         await DisableBluetoothControlAsync();
@@ -3443,6 +3687,18 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         var connectedCount = Devices.Count(device => device.IsWireless);
         var sanitized = WirelessReceiverConfiguration.SanitizeReceiverName(WirelessReceiverName);
         var operation = Stopwatch.StartNew();
+        if (!_wireless.IsBackendAvailable(backend))
+        {
+            var unavailable = LocalizationService.Format(
+                "WirelessBackendUnavailableFormat", backendOption.Label);
+            WirelessStatus = unavailable;
+            AddDiagnosticLog(AppLog.Event("wireless_settings_backend_unavailable",
+                ("backend", backend.ToString()), ("error", unavailable)));
+            AddUiLog(unavailable);
+            AppPromptWindow.Inform(LocalizationService.Get("WirelessSettingsTitle"),
+                unavailable);
+            return;
+        }
         AddDiagnosticLog(AppLog.Event("wireless_settings_begin",
             ("receiver_name_length", sanitized.Length),
             ("backend", backend.ToString()), ("profile", profile.Label),
@@ -6720,6 +6976,11 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     {
         if (_disposed) return;
         var shutdownTimer = Stopwatch.StartNew();
+        // Shutdown runs from WPF's close path. A native USB/GATT call that
+        // never completes must not keep that path blocked indefinitely. Each
+        // stage below is therefore best-effort and bounded; process teardown
+        // is safer than leaving the window in an unresponsive state.
+        var shutdownStageTimeout = TimeSpan.FromMilliseconds(1500);
         AddDiagnosticLog(AppLog.Event("app_shutdown_begin",
             ("sessions", _sessions.Values.Count(state => state.HasSession)),
             ("media_cast", _isMediaCasting), ("uptime_ms", _lifetime.ElapsedMilliseconds)));
@@ -6729,24 +6990,36 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         _disposed = true;
         _shutdownCancellation.Cancel();
         LocalizationService.LanguageChanged -= OnLanguageChanged;
-        BluetoothControlNoticeWindow.ActiveNoticeClosed -= OnBluetoothControlNoticeClosed;
-        await DisableUsbControlAsync();
-        await DisableWirelessControlAsync();
-        await _bluetoothControl.DisposeAsync();
+        await AwaitShutdownStageAsync("disable_usb_control",
+            DisableUsbControlAsync(), shutdownStageTimeout);
+        await AwaitShutdownStageAsync("disable_wireless_control",
+            DisableWirelessControlAsync(), shutdownStageTimeout);
+        await AwaitShutdownStageAsync("dispose_bluetooth_control",
+            _bluetoothControl.DisposeAsync().AsTask(), shutdownStageTimeout);
         _mediaOutput.StatusChanged -= OnMediaOutputStatusChanged;
         _virtualCamera.StatusChanged -= OnMediaOutputStatusChanged;
+        await AwaitShutdownStageAsync("dispose_media_output",
+            DisposeMediaOutputAsync(), shutdownStageTimeout);
+        AddDiagnosticLog(AppLog.Event("app_shutdown_wait_core_gate"));
+        var coreGateHeld = false;
         try
         {
-            await _mediaOutput.DisposeAsync();
-            await _virtualCamera.DisposeAsync();
+            coreGateHeld = await _coreGate.WaitAsync(shutdownStageTimeout);
+            if (!coreGateHeld)
+            {
+                AddDiagnosticLog(AppLog.Event("app_shutdown_core_gate_timeout",
+                    ("elapsed_ms", shutdownTimer.ElapsedMilliseconds),
+                    ("limit_ms", shutdownStageTimeout.TotalMilliseconds)));
+                return;
+            }
         }
         catch (Exception error)
         {
-            AddDiagnosticLog(AppLog.Event("media_output_shutdown_failed",
+            AddDiagnosticLog(AppLog.Event("app_shutdown_core_gate_failed",
+                ("elapsed_ms", shutdownTimer.ElapsedMilliseconds),
                 ("error", AppLog.Error(error))));
+            return;
         }
-        AddDiagnosticLog(AppLog.Event("app_shutdown_wait_core_gate"));
-        await _coreGate.WaitAsync();
         AddDiagnosticLog(AppLog.Event("app_shutdown_core_gate_acquired"));
         try
         {
@@ -6809,7 +7082,50 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         }
         finally
         {
-            _coreGate.Release();
+            if (coreGateHeld) _coreGate.Release();
+        }
+    }
+
+    private async Task DisposeMediaOutputAsync()
+    {
+        try
+        {
+            await _mediaOutput.DisposeAsync();
+            await _virtualCamera.DisposeAsync();
+        }
+        catch (Exception error)
+        {
+            AddDiagnosticLog(AppLog.Event("media_output_shutdown_failed",
+                ("error", AppLog.Error(error))));
+        }
+    }
+
+    private async Task AwaitShutdownStageAsync(string stage, Task operation,
+        TimeSpan timeout)
+    {
+        try
+        {
+            var completed = await Task.WhenAny(operation, Task.Delay(timeout))
+                .ConfigureAwait(false);
+            if (!ReferenceEquals(completed, operation))
+            {
+                AddDiagnosticLog(AppLog.Event("app_shutdown_stage_timeout",
+                    ("stage", stage), ("elapsed_ms", timeout.TotalMilliseconds)));
+                _ = operation.ContinueWith(task =>
+                {
+                    if (task.Exception is not null)
+                        DiagnosticLogger.Exception("shutdown",
+                            "late_shutdown_stage_failed",
+                            task.Exception.GetBaseException(), ("stage", stage));
+                }, TaskScheduler.Default);
+                return;
+            }
+            await operation.ConfigureAwait(false);
+        }
+        catch (Exception error)
+        {
+            AddDiagnosticLog(AppLog.Event("app_shutdown_stage_failed",
+                ("stage", stage), ("error", AppLog.Error(error))));
         }
     }
 

@@ -233,7 +233,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $SourceRoot '.git') -PathType Contai
     if ($LASTEXITCODE -ne 0) { throw "Could not clone UxPlay: $LASTEXITCODE" }
 }
 $safeSource = (Resolve-Path -LiteralPath $SourceRoot).Path.Replace('\', '/')
-$head = (& git -c "safe.directory=$safeSource" -C $SourceRoot rev-parse HEAD).Trim()
+$headOutput = @(& git -c "safe.directory=$safeSource" -C $SourceRoot rev-parse HEAD)
+if ($LASTEXITCODE -ne 0 -or $headOutput.Count -eq 0 -or
+    [string]::IsNullOrWhiteSpace($headOutput[-1])) {
+    throw "Could not determine the UxPlay source revision: $SourceRoot"
+}
+$head = ([string]$headOutput[-1]).Trim()
 if ($head -ne $Commit -or
     -not (Test-Path -LiteralPath (Join-Path $SourceRoot 'CMakeLists.txt') -PathType Leaf)) {
     & git -c "safe.directory=$safeSource" -C $SourceRoot fetch --depth 1 origin $Commit

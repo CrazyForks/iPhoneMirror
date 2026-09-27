@@ -357,6 +357,9 @@ function Assert-PublishedOutput {
             ForEach-Object { $_.FullName.Substring($fullPublishRoot.Length + 1) })
     }
     else { @() }
+    if (-not $UseUxPlayRuntime -and $uxplayArtifacts.Count -ne 0) {
+        throw 'UxPlay runtime is present despite -OmitUxPlayRuntime.'
+    }
     $ddiRoot = Join-Path $PublishRoot 'tools\ddi'
     $ddiArtifacts = if (Test-Path -LiteralPath $ddiRoot -PathType Container) {
         @(Get-ChildItem -LiteralPath $ddiRoot -Recurse -File |
@@ -685,15 +688,19 @@ try {
         $RootPackage.copyrightText = 'Copyright (c) 2026 RayrenSX and third-party contributors'
         $VcRuntimeVersion = (Get-Item -LiteralPath `
             (Join-Path $PublishRoot 'vcruntime140.dll')).VersionInfo.ProductVersion
-        $UxPlaySource = Join-Path $PublishRoot 'Wireless\UxPlay\SOURCE.md'
-        $UxPlaySourceText = [IO.File]::ReadAllText($UxPlaySource, [Text.Encoding]::UTF8)
-        $GStreamerVersionMatch = [regex]::Match($UxPlaySourceText,
-            '(?m)^GStreamer version:\s*(?<version>\d+(?:\.\d+){1,3})\s*$')
-        if (-not $GStreamerVersionMatch.Success) {
-            throw 'UxPlay source record does not declare the bundled GStreamer version.'
+        $GStreamerVersion = ''
+        $GStreamerSpdxVersion = ''
+        if ($UseUxPlayRuntime) {
+            $UxPlaySource = Join-Path $PublishRoot 'Wireless\UxPlay\SOURCE.md'
+            $UxPlaySourceText = [IO.File]::ReadAllText($UxPlaySource, [Text.Encoding]::UTF8)
+            $GStreamerVersionMatch = [regex]::Match($UxPlaySourceText,
+                '(?m)^GStreamer version:\s*(?<version>\d+(?:\.\d+){1,3})\s*$')
+            if (-not $GStreamerVersionMatch.Success) {
+                throw 'UxPlay source record does not declare the bundled GStreamer version.'
+            }
+            $GStreamerVersion = $GStreamerVersionMatch.Groups['version'].Value
+            $GStreamerSpdxVersion = $GStreamerVersion -replace '\.', '-'
         }
-        $GStreamerVersion = $GStreamerVersionMatch.Groups['version'].Value
-        $GStreamerSpdxVersion = $GStreamerVersion -replace '\.', '-'
 
         $NativePackages = [Collections.Generic.List[object]]@(
             [PSCustomObject][ordered]@{
@@ -794,6 +801,13 @@ try {
                 supplier = 'Organization: Microsoft Corporation'
             }
         )
+        if (-not $UseUxPlayRuntime) {
+            $NativePackages = [Collections.Generic.List[object]]@(
+                $NativePackages | Where-Object {
+                    $_.name -notin @('FDH2 UxPlay wireless receiver',
+                        'GStreamer UCRT64 runtime')
+                })
+        }
         if ($UseMediaOutputRuntime) {
             $NativePackages.Add([PSCustomObject][ordered]@{
                 name = 'FFmpeg media-output runtime'

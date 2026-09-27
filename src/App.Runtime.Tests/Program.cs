@@ -40,6 +40,8 @@ internal static class Program
                 return RunUiPreview(themeName, surface);
             TestWheelCancellationState();
             TestUsbPasteKeyboardState();
+            TestReverseControlWorkflowStages();
+            TestTerminalReverseControlStatusIgnoresLateStartupEvents();
             TestUpdateWindowThemeSwitch();
             Console.WriteLine("App runtime tests passed.");
             return 0;
@@ -141,6 +143,89 @@ internal static class Program
             [isKeyDown, usage, modifiers, usages, pastePending, false];
         var intercepted = (bool)intercept.Invoke(null, arguments)!;
         return (intercepted, (bool)arguments[4]!, (bool)arguments[5]!);
+    }
+
+    private static void TestReverseControlWorkflowStages()
+    {
+        var assembly = typeof(App).Assembly;
+        var viewModelType = assembly.GetType(
+            "IPhoneMirror.App.Windows.ReverseControlStatusViewModel",
+            throwOnError: true)!;
+        var modeType = assembly.GetType(
+            "IPhoneMirror.App.Services.ControlStatusMode",
+            throwOnError: true)!;
+        var getStages = viewModelType.GetMethod("GetWorkflowStages",
+            BindingFlags.Static | BindingFlags.NonPublic) ??
+            throw new MissingMethodException(viewModelType.FullName,
+                "GetWorkflowStages");
+
+        foreach (var propertyName in new[] { "Stages", "Diagnostics", "PromptOptions" })
+        {
+            if (viewModelType.GetProperty(propertyName,
+                    BindingFlags.Instance | BindingFlags.Public) is null)
+                throw new InvalidOperationException(
+                    $"{propertyName} must be public so WPF can bind its items.");
+        }
+
+        AssertStages("Usb",
+            ["CheckingDevice", "CheckingPermissions", "PreparingDeviceSupport",
+                "Connecting", "InitializingServices", "StartingInputRouter"]);
+        AssertStages("Wireless",
+            ["CheckingDevice", "CheckingPermissions", "Connecting",
+                "InitializingServices", "StartingInputRouter"]);
+        AssertStages("Bluetooth",
+            ["CheckingBinding", "CheckingBluetooth", "SwitchingBluetoothPeripheral",
+                "WaitingForPhoneConnection", "VerifyingTouch"]);
+        return;
+
+        void AssertStages(string mode, string[] expected)
+        {
+            var value = Enum.Parse(modeType, mode);
+            var stages = (IEnumerable)(getStages.Invoke(null, [value]) ??
+                throw new InvalidOperationException(
+                    $"No reverse-control stages were returned for {mode}."));
+            var actual = stages.Cast<object>().Select(stage => stage.ToString()).ToArray();
+            if (!actual.SequenceEqual(expected))
+                throw new InvalidOperationException(
+                    $"Unexpected {mode} reverse-control workflow: " +
+                    string.Join(", ", actual));
+        }
+    }
+
+    private static void TestTerminalReverseControlStatusIgnoresLateStartupEvents()
+    {
+        var assembly = typeof(App).Assembly;
+        var serviceType = assembly.GetType(
+            "IPhoneMirror.App.Services.ControlStatusService", throwOnError: true)!;
+        var modeType = assembly.GetType(
+            "IPhoneMirror.App.Services.ControlStatusMode", throwOnError: true)!;
+        var stageType = assembly.GetType(
+            "IPhoneMirror.App.Services.ControlStage", throwOnError: true)!;
+        var service = Activator.CreateInstance(serviceType, nonPublic: true)!
+            ?? throw new InvalidOperationException("Could not create ControlStatusService.");
+        var usb = Enum.Parse(modeType, "Usb");
+        var connecting = Enum.Parse(stageType, "Connecting");
+        var initializing = Enum.Parse(stageType, "InitializingServices");
+        var report = serviceType.GetMethod("Report",
+            BindingFlags.Instance | BindingFlags.NonPublic) ??
+            throw new MissingMethodException(serviceType.FullName, "Report");
+        var ready = serviceType.GetMethod("Ready",
+            BindingFlags.Instance | BindingFlags.NonPublic) ??
+            throw new MissingMethodException(serviceType.FullName, "Ready");
+        var current = serviceType.GetProperty("Current",
+            BindingFlags.Instance | BindingFlags.NonPublic) ??
+            throw new MissingMemberException(serviceType.FullName, "Current");
+
+        report.Invoke(service, [usb, connecting, "iPhone", "connecting", true, null, 0, 0]);
+        ready.Invoke(service, [usb, "iPhone", "ready"]);
+        report.Invoke(service, [usb, initializing, "iPhone", "late startup event", true, null, 0, 0]);
+
+        var snapshot = current.GetValue(service) ??
+            throw new InvalidOperationException("ControlStatusService did not retain a snapshot.");
+        var stage = snapshot.GetType().GetProperty("Stage")?.GetValue(snapshot)?.ToString();
+        if (!string.Equals(stage, "Ready", StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"A late startup event regressed terminal reverse-control status to {stage}.");
     }
 
     private static void DrainDispatcher()
@@ -852,7 +937,7 @@ internal static class Program
                         "Developer tools window must be independent and non-topmost.");
                 AssertWindowsOwnOuterCorners(window, "Developer tools");
                 AssertCatalogCount(windowType, window, "WorkspaceItems", 6);
-                AssertCatalogCount(windowType, window, "WindowItems", 18);
+                AssertCatalogCount(windowType, window, "WindowItems", 25);
                 foreach (var controlName in new[]
                 {
                     "ThemeComboBox", "LanguageComboBox", "OpacitySlider",

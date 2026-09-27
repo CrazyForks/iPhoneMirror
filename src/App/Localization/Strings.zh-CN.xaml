@@ -137,6 +137,7 @@
     <system:String x:Key="ReverseControlUsbEnabled">USB 控制已启用</system:String>
     <system:String x:Key="ReverseControlUsbConnected">USB 控制已连接（设备认证状态需以实测为准）</system:String>
     <system:String x:Key="ReverseControlUsbFailedFormat">USB 控制连接失败：{0}</system:String>
+    <system:String x:Key="ReverseControlUsbBindingChanged">设备 USB 绑定已改变，请重新启用控制。</system:String>
     <system:String x:Key="ReverseControlUsbStopping">正在关闭 USB 控制</system:String>
     <system:String x:Key="ReverseControlUsbOff">USB 控制未启用</system:String>
     <system:String x:Key="ReverseControlUsbStopFailedFormat">USB 控制关闭失败：{0}</system:String>
@@ -273,6 +274,9 @@
     <system:String x:Key="BluetoothControlFailedBody">Windows 未能启动 BLE HID 外设服务。请检查蓝牙适配器和驱动是否支持外设模式。</system:String>
     <system:String x:Key="BluetoothControlFailedStatus">启动失败</system:String>
     <system:String x:Key="ReverseControlErrorTitle">反向控制错误</system:String>
+    <system:String x:Key="ReverseControlTitle">反向控制</system:String>
+    <system:String x:Key="ReverseControlDetails">查看详细信息</system:String>
+    <system:String x:Key="ReverseControlRetry">重试</system:String>
     <system:String x:Key="ReverseControlStartErrorTitle">反向控制启动失败</system:String>
     <system:String x:Key="ReverseControlRecoveryErrorTitle">反向控制连接中断</system:String>
     <system:String x:Key="ReverseControlStopErrorTitle">反向控制关闭异常</system:String>

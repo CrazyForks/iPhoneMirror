@@ -252,6 +252,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private byte _controlKeyboardModifiers;
     private bool _pasteVPending;
     private bool _windowsCursorHidden;
+    private int _cursorHideShowCalls;
     private nint _activeControlWindow;
     private string? _activeControlUdid;
     private bool _rawMouseInputEnabled;
@@ -267,6 +268,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private readonly LowLevelKeyboardProc _keyboardHookProc;
 
     private const int WmInput = 0x00FF;
+    private const uint PmRemove = 0x0001;
     private const int WmHotKey = 0x0312;
     private const int WmSetCursor = 0x0020;
     private const int WmActivateApp = 0x001C;
@@ -406,7 +408,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             Interval = TimeSpan.FromSeconds(2.6),
         };
         _mediaControlsHideTimer.Tick += OnMediaControlsHideTimerTick;
-        _controlPointerTimer = new Timer(_ => _ = FlushControlPointerAsync(),
+        _controlPointerTimer = new Timer(_ => _ = FlushControlPointerSafeAsync(),
             null, Timeout.Infinite, Timeout.Infinite);
         StateChanged += OnWindowStateChanged;
         Loaded += OnLoaded;
@@ -589,7 +591,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         }
         if (IsUsbControlActive)
         {
-            _ = HandleUsbPointerInputAsync(e, _viewModel.SelectedDevice?.Udid);
+            _ = ObserveControlSendAsync(
+                HandleUsbPointerInputAsync(e, _viewModel.SelectedDevice?.Udid),
+                "usb_pointer");
             return;
         }
         HandleControlPointerInput(e, _viewModel.SelectedDevice?.Udid);
@@ -676,7 +680,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             if (!state.WheelDraining)
             {
                 state.WheelDraining = true;
-                _ = DrainWheelAsync(state, sourceUdid);
+                _ = ObserveControlSendAsync(
+                    DrainWheelAsync(state, sourceUdid), "usb_wheel");
             }
             return;
         }
@@ -935,17 +940,23 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             }
             if (!_controlPointerInitialized)
             {
-                _lastControlSourceX = 0;
-                _lastControlSourceY = 0;
+                // Relative HID has no absolute origin. The first WPF pointer
+                // event only establishes an anchor; treating its image
+                // coordinates as a delta from (0,0) produces a large jump
+                // that looks like queued movement being replayed.
+                _lastControlSourceX = mapped.X;
+                _lastControlSourceY = mapped.Y;
                 _controlPointerInitialized = true;
+                return;
             }
             var dx = (double)(mapped.X - _lastControlSourceX);
             var dy = (double)(mapped.Y - _lastControlSourceY);
             _lastControlSourceX = mapped.X;
             _lastControlSourceY = mapped.Y;
-            var sensitivity = PointerSensitivity(
-                sourceWidth, sourceHeight) *
-                (_viewModel.AppliedBluetoothMouseSensitivity / 100.0);
+            var sensitivity = _viewModel.AppliedBluetoothMouseSensitivity / 100.0;
+            // MapPointerToSource already returns source-video pixels. Keep
+            // this path in the same source-pixel unit as Raw Input before
+            // applying the configured sensitivity.
             var oriented = MapMouseDeltaToDeviceOrientation(dx, dy,
                 sourceWidth, sourceHeight,
                 e.Rotation,
@@ -953,10 +964,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _viewModel.AppliedBluetoothLandscapeMouseDirection,
                 _viewModel.AppliedBluetoothMouseReverseHorizontal,
                 _viewModel.AppliedBluetoothMouseReverseVertical);
-            dx = oriented.X;
-            dy = oriented.Y;
-            var scaledX = dx * sensitivity + _controlRemainderX;
-            var scaledY = dy * sensitivity + _controlRemainderY;
+            // Convert source-video pixels back to the physical preview
+            // pixels that generated the event. Raw Input already arrives in
+            // this physical-pixel unit, so both paths now share one scale.
+            dx = oriented.X * Math.Max(1.0, e.SurfaceWidth) /
+                Math.Max(1u, sourceWidth) * sensitivity;
+            dy = oriented.Y * Math.Max(1.0, e.SurfaceHeight) /
+                Math.Max(1u, sourceHeight) * sensitivity;
+            var scaledX = dx + _controlRemainderX;
+            var scaledY = dy + _controlRemainderY;
             var sendX = (int)Math.Truncate(scaledX);
             var sendY = (int)Math.Truncate(scaledY);
             _controlRemainderX = scaledX - sendX;
@@ -965,16 +981,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             {
                 lock (_controlQueueSync)
                 {
-                    // BLE mouse reports are relative, but replaying every
-                    // sample after a slow notification creates a stale burst.
-                    // Keep only the newest bounded sample; the next pointer
-                    // event supersedes it while the GATT pump is busy.
-                    _pendingControlDx = Math.Clamp(sendX, -127, 127);
-                    _pendingControlDy = Math.Clamp(sendY, -127, 127);
+                    DropStalePendingControlMotion();
+                    // Coalesce only the current timer window. This preserves
+                    // physical mouse speed when Raw Input emits many small
+                    // packets, while the bounded slot prevents a BLE stall
+                    // from becoming a historical replay burst.
+                    _pendingControlDx = Math.Clamp(_pendingControlDx + sendX,
+                        -32767, 32767);
+                    _pendingControlDy = Math.Clamp(_pendingControlDy + sendY,
+                        -32767, 32767);
                     _pendingControlButtons = _controlButtons;
-                    // Keep the timestamp of the first unsent movement. Updating
-                    // it for every packet disguises a multi-second route/UI
-                    // stall as fresh input and releases the entire old burst.
                     if (_pendingControlMotionAt == 0)
                         _pendingControlMotionAt = Stopwatch.GetTimestamp();
                 }
@@ -992,7 +1008,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _pendingControlStateDirty = true;
             }
             StartControlPointerTimer();
-            _ = FlushControlPointerAsync(force: true);
+            _ = FlushControlPointerSafeAsync(force: true);
             return;
         }
         if (e.Kind == Controls.PreviewPointerKind.Wheel)
@@ -1014,13 +1030,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 if (wheelUnits == 0) return;
                 lock (_controlQueueSync)
                 {
-                    _pendingControlWheel = Math.Clamp(_pendingControlWheel - wheelUnits,
-                        -127, 127);
+                    // Wheel input is also relative. Keep only the newest
+                    // unsent tick so a stalled BLE link cannot replay a long
+                    // scroll burst after it recovers.
+                    _pendingControlWheel = Math.Clamp(-wheelUnits, -127, 127);
                     _pendingControlButtons = _controlButtons;
                     _pendingControlStateDirty = true;
                 }
                 StartControlPointerTimer();
-                _ = FlushControlPointerAsync();
+                _ = FlushControlPointerSafeAsync();
             }
             return;
         }
@@ -1034,7 +1052,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             _pendingControlStateDirty = true;
         }
         StartControlPointerTimer();
-        _ = FlushControlPointerAsync(force: true);
+        _ = FlushControlPointerSafeAsync(force: true);
     }
 
     private void StartControlPointerTimer()
@@ -1043,7 +1061,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         // motion can otherwise create an immediate callback storm and starve
         // both WPF and the BLE notification pump.
         if (Interlocked.Exchange(ref _controlPointerTimerArmed, 1) == 0)
-            _controlPointerTimer.Change(1, 16);
+            _controlPointerTimer.Change(1, 4);
     }
 
     private void StopControlPointerTimer()
@@ -1095,7 +1113,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                     Stopwatch.Frequency;
                 if (ageMs > 80) { dx = 0; dy = 0; }
             }
-            await _viewModel.SendBluetoothMouseAsync(dx, dy, buttons, wheel);
+            await _viewModel.SendBluetoothMouseAsync(dx, dy, buttons, wheel, routeUdid);
         }
         finally
         {
@@ -1111,12 +1129,28 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         }
     }
 
+    private async Task FlushControlPointerSafeAsync(bool force = false)
+    {
+        try
+        {
+            await FlushControlPointerAsync(force).ConfigureAwait(true);
+        }
+        catch (Exception error)
+        {
+            // Timer callbacks and fire-and-forget input sends must not become
+            // unobserved task exceptions that can take down the WPF dispatcher.
+            _viewModel.AddDiagnosticLog(AppLog.Event(
+                "bluetooth_pointer_flush_failed", ("error", AppLog.Error(error))));
+        }
+    }
+
     private void OnIndependentPointerInput(string udid,
         Controls.PreviewPointerEventArgs e)
     {
         if (_viewModel.UsbControlIsInputEnabled && _viewModel.IsUsbControlTarget(udid))
         {
-            _ = HandleUsbPointerInputAsync(e, udid);
+            _ = ObserveControlSendAsync(
+                HandleUsbPointerInputAsync(e, udid), "usb_pointer");
             return;
         }
         if (_activeControlWindow == 0 ||
@@ -1168,6 +1202,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             ClearBluetoothControlInputState();
             if (_viewModel.IsBluetoothControlEnabled)
                 await _viewModel.DisableBluetoothControlAsync();
+            if (_viewModel.IsUsbControlEnabled)
+                ApplyBluetoothControlInputState(activateIndependentWindow: false);
         }
         catch (Exception error)
         {
@@ -1224,7 +1260,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             }
             else
                 ClearBluetoothControlInputState();
-            _controlPointerInitialized = true;
+            // The first pointer event in the newly activated native window
+            // establishes the relative-motion anchor.
+            _controlPointerInitialized = false;
             _lastControlSourceX = 0;
             _lastControlSourceY = 0;
             _controlRemainderX = 0;
@@ -1254,6 +1292,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     {
         try
         {
+            if (_viewModel.IsWirelessControlEnabled) return;
             ShowReverseControlStatus(ControlStatusMode.Usb);
             var device = _viewModel.Devices.FirstOrDefault(candidate =>
                 DeviceViewModel.UdidEquals(candidate.Udid, udid));
@@ -1261,18 +1300,14 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             if (!ReferenceEquals(_viewModel.SelectedDevice, device))
                 _viewModel.SelectedDevice = device;
             await _viewModel.StartUsbControlAsync(udid);
-            if (_viewModel.IsUsbControlEnabled)
+            if (_viewModel.IsUsbControlEnabled &&
+                !_viewModel.IsWirelessControlEnabled &&
+                _viewModel.IsUsbControlTarget(udid))
             {
                 _activeControlWindow = window;
                 _activeControlUdid = udid;
                 _secondaryMirrors.PrepareUsbControlWindow(udid);
                 ApplyBluetoothControlInputState(activateIndependentWindow: false);
-            }
-            else
-            {
-                _activeControlWindow = 0;
-                _activeControlUdid = null;
-                ClearBluetoothControlInputState();
             }
         }
         catch (Exception error)
@@ -1364,7 +1399,12 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         Controls.PreviewKeyboardEventArgs e, string? sourceUdid = null,
         bool fromRawInput = false)
     {
-        await _bluetoothRouteGate.WaitAsync();
+        // Hold the route gate only while classifying the event and updating
+        // pressed-key state. During a route transition the state is reset by
+        // the owner, so drop input immediately instead of queuing async-void
+        // handlers behind a long transition.
+        if (Volatile.Read(ref _bluetoothRouteChanging) != 0 ||
+            !await _bluetoothRouteGate.WaitAsync(0)) return;
         try
         {
             if (Volatile.Read(ref _bluetoothRouteChanging) != 0) return;
@@ -1389,8 +1429,14 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _controlModifierKeys.Clear();
                 _controlKeyboardModifiers = 0;
                 _pasteVPending = false;
-                if (bluetoothTargetActive) await _viewModel.SendBluetoothKeyboardAsync(0, []);
-                if (usbTargetActive) await _viewModel.SendUsbKeyboardAsync([], routeUdid);
+                if (bluetoothTargetActive)
+                    _ = ObserveControlSendAsync(
+                        _viewModel.SendBluetoothKeyboardAsync(0, [], routeUdid),
+                        "bluetooth_keyboard_reset");
+                if (usbTargetActive)
+                    _ = ObserveControlSendAsync(
+                        _viewModel.SendUsbKeyboardAsync([], routeUdid),
+                        "usb_keyboard_reset");
                 return;
             }
             // Raw Input is preferred on the main preview, but it is not
@@ -1447,12 +1493,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 catch { /* Clipboard lock or bridge unavailable. */ }
             }
             if (bluetoothTargetActive)
-                await _viewModel.SendBluetoothKeyboardAsync(_controlKeyboardModifiers,
-                    bluetoothUsages);
+                _ = ObserveControlSendAsync(
+                    _viewModel.SendBluetoothKeyboardAsync(_controlKeyboardModifiers,
+                        bluetoothUsages, routeUdid), "bluetooth_keyboard");
             if (usbTargetActive && !pasteIntercepted)
             {
                 var usbUsages = usages.Concat(ModifierUsages(_controlModifierKeys)).ToArray();
-                await _viewModel.SendUsbKeyboardAsync(usbUsages, routeUdid);
+                _ = ObserveControlSendAsync(
+                    _viewModel.SendUsbKeyboardAsync(usbUsages, routeUdid),
+                    "usb_keyboard");
             }
         }
         catch (Exception error)
@@ -1465,6 +1514,17 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         finally
         {
             _bluetoothRouteGate.Release();
+        }
+    }
+
+    private async Task ObserveControlSendAsync(Task sendTask, string operation)
+    {
+        try { await sendTask.ConfigureAwait(false); }
+        catch (Exception error)
+        {
+            _viewModel.AddDiagnosticLog(AppLog.Event(
+                "control_send_failed", ("operation", operation),
+                ("error", AppLog.Error(error))));
         }
     }
 
@@ -1551,7 +1611,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         ClipCursor(IntPtr.Zero);
         StopControlPointerTimer();
         _controlPointerTimer.Dispose();
+        MainPreviewHost.ReleasePointerCapture();
         RegisterRawInput(false, false);
+        _ = ReleaseCapture();
         UnregisterConfiguredHotkeys();
         SetWindowsCursorHidden(false);
         if (_rawInputBuffer != 0)
@@ -1574,15 +1636,20 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         {
             ResetMainControlState();
         }
-        if (message == WmInput && _activeControlWindow == 0 &&
+        if (message == WmInput &&
             (IsBluetoothControlActive || IsUsbControlActive) &&
             (_rawMouseInputEnabled || _rawKeyboardInputEnabled))
         {
-            ProcessRawInput(lParam);
-            // WM_INPUT requires DefWindowProc cleanup after GetRawInputData.
-            // Skipping it leaves raw packets outstanding in the window
-            // manager and eventually replays old mouse movement in bursts.
-            _ = DefWindowProcW(hwnd, message, wParam, lParam);
+            if (_rawMouseInputEnabled && GetRawInputType(lParam) == RimTypeMouse)
+                ProcessLatestQueuedRawMouseInput(hwnd, wParam, lParam);
+            else
+            {
+                ProcessRawInput(lParam);
+                // WM_INPUT requires DefWindowProc cleanup after
+                // GetRawInputData. Skipping it leaves raw packets outstanding
+                // in the window manager and eventually replays old movement.
+                _ = DefWindowProcW(hwnd, message, wParam, lParam);
+            }
             handled = true;
             return 0;
         }
@@ -1596,6 +1663,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         if (message == WmSetCursor && IsBluetoothControlActive)
         {
             SetWindowsCursorHidden(true);
+            ClipWindowsCursorToControlSurface();
             handled = true;
             return 1;
         }
@@ -1655,17 +1723,18 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             ("mouse", _rawMouseInputEnabled),
             ("win32_error", registered ? 0 : Marshal.GetLastWin32Error())));
         MainPreviewHost.SuppressMouseMove = _rawMouseInputEnabled;
-        if (mouseEnabled || keyboardEnabled)
-        {
-            MainPreviewHost.Focus();
-        }
-        // Reverse control should not trap the Windows pointer inside the
-        // preview surface or an independent preview window. Pointer capture
-        // still supplies relative mouse reports while the cursor remains free.
-        ClipCursor(IntPtr.Zero);
+        MainPreviewHost.SuppressLegacyMouseButtons = _rawMouseInputEnabled;
+        // RIDEV_INPUTSINK delivers raw packets without focus. Re-focusing the
+        // native preview here races the connected-control/status-window focus
+        // transition and can synchronously stall WPF's message pump.
+        // ApplyBluetoothControlInputState has already requested the preview
+        // focus when that is appropriate; never force it a second time here.
+        _viewModel.AddDiagnosticLog(AppLog.Event("raw_input_registration_complete",
+            ("mouse", _rawMouseInputEnabled),
+            ("keyboard", _rawKeyboardInputEnabled)));
     }
 
-    private void ProcessRawInput(nint rawInput)
+    private void ProcessRawInput(nint rawInput, bool includeMouseMovement = true)
     {
         uint size = 0;
         _ = GetRawInputData(rawInput, RidInput, 0, ref size,
@@ -1687,38 +1756,50 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             return;
         }
         if (input.Header.Type != RimTypeMouse) return;
+        // Raw Input can race the asynchronous route transition and arrive
+        // after Bluetooth control has already been disabled. Do not let that
+        // stale packet enter the next route's pending-motion slot.
+        if (!IsBluetoothControlActiveFor(_activeControlWindow != 0
+                ? _activeControlUdid : _viewModel.SelectedDevice?.Udid))
+            return;
+        if (includeMouseMovement)
+        {
+            ClipWindowsCursorToControlSurface();
 
-        var sourceWidth = _viewModel.SourceVideoWidth;
-        var sourceHeight = _viewModel.SourceVideoHeight;
-        var rotation = 0;
-        if (_activeControlWindow != 0 &&
-            _secondaryMirrors.TryGetControlGeometry(_activeControlUdid,
-                out var windowWidth, out var windowHeight, out var windowRotation))
-        {
-            sourceWidth = windowWidth;
-            sourceHeight = windowHeight;
-            rotation = windowRotation;
+            var sourceWidth = _viewModel.SourceVideoWidth;
+            var sourceHeight = _viewModel.SourceVideoHeight;
+            var rotation = 0;
+            if (_activeControlWindow != 0 &&
+                _secondaryMirrors.TryGetControlGeometry(_activeControlUdid,
+                    out var windowWidth, out var windowHeight, out var windowRotation))
+            {
+                sourceWidth = windowWidth;
+                sourceHeight = windowHeight;
+                rotation = windowRotation;
+            }
+            if (sourceWidth != _lastControlGeometryWidth ||
+                sourceHeight != _lastControlGeometryHeight ||
+                rotation != _lastControlGeometryRotation)
+            {
+                _lastControlGeometryWidth = sourceWidth;
+                _lastControlGeometryHeight = sourceHeight;
+                _lastControlGeometryRotation = rotation;
+                _controlRemainderX = 0;
+                _controlRemainderY = 0;
+            }
+            // Raw Input reports physical mouse counts. Do not apply a
+            // source-resolution divisor here: it makes the maximum sensitivity
+            // feel slow and causes large packets to hit the boot-report clamp.
+            var sensitivity = _viewModel.AppliedBluetoothMouseSensitivity / 100.0;
+            var (deviceDx, deviceDy) = MapMouseDeltaToDeviceOrientation(
+                input.Mouse.LastX * sensitivity, input.Mouse.LastY * sensitivity,
+                sourceWidth, sourceHeight, rotation,
+                _viewModel.AppliedBluetoothPortraitMouseDirection,
+                _viewModel.AppliedBluetoothLandscapeMouseDirection,
+                _viewModel.AppliedBluetoothMouseReverseHorizontal,
+                _viewModel.AppliedBluetoothMouseReverseVertical);
+            AddRawControlDelta(deviceDx, deviceDy);
         }
-        if (sourceWidth != _lastControlGeometryWidth ||
-            sourceHeight != _lastControlGeometryHeight ||
-            rotation != _lastControlGeometryRotation)
-        {
-            _lastControlGeometryWidth = sourceWidth;
-            _lastControlGeometryHeight = sourceHeight;
-            _lastControlGeometryRotation = rotation;
-            _controlRemainderX = 0;
-            _controlRemainderY = 0;
-        }
-        var sensitivity = PointerSensitivity(sourceWidth, sourceHeight) *
-            (_viewModel.AppliedBluetoothMouseSensitivity / 100.0);
-        var (deviceDx, deviceDy) = MapMouseDeltaToDeviceOrientation(
-            input.Mouse.LastX * sensitivity, input.Mouse.LastY * sensitivity,
-            sourceWidth, sourceHeight, rotation,
-            _viewModel.AppliedBluetoothPortraitMouseDirection,
-            _viewModel.AppliedBluetoothLandscapeMouseDirection,
-            _viewModel.AppliedBluetoothMouseReverseHorizontal,
-            _viewModel.AppliedBluetoothMouseReverseVertical);
-        AddRawControlDelta(deviceDx, deviceDy);
 
         var flags = input.Mouse.ButtonFlags;
         if ((flags & RawMouseLeftDown) != 0) HandleRawButton(1, true);
@@ -1730,6 +1811,54 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         if ((flags & RawMouseWheel) != 0)
             HandleRawWheel(unchecked((short)input.Mouse.ButtonData));
 
+    }
+
+    private uint GetRawInputType(nint rawInput)
+    {
+        uint size = 0;
+        if (GetRawInputData(rawInput, RidInput, 0, ref size,
+                (uint)Marshal.SizeOf<RawInputHeader>()) == unchecked((uint)-1) ||
+            size < (uint)Marshal.SizeOf<RawInputHeader>())
+            return 0;
+        if (_rawInputBuffer == 0 || _rawInputBufferSize < size)
+        {
+            if (_rawInputBuffer != 0) Marshal.FreeHGlobal(_rawInputBuffer);
+            _rawInputBuffer = Marshal.AllocHGlobal((int)size);
+            _rawInputBufferSize = (int)size;
+        }
+        if (GetRawInputData(rawInput, RidInput, _rawInputBuffer, ref size,
+                (uint)Marshal.SizeOf<RawInputHeader>()) == unchecked((uint)-1))
+            return 0;
+        return (uint)Marshal.ReadInt32(_rawInputBuffer);
+    }
+
+    private void ProcessLatestQueuedRawMouseInput(nint hwnd, nint currentWParam,
+        nint currentLParam)
+    {
+        var latestWParam = currentWParam;
+        var latestLParam = currentLParam;
+        var queued = new NativeMessage();
+        while (PeekMessageW(ref queued, hwnd, WmInput, WmInput, PmRemove))
+        {
+            if (GetRawInputType(queued.LParam) == RimTypeMouse)
+            {
+                // Discard only stale movement. Preserve button transitions so
+                // a queued release cannot be lost behind a newer move packet.
+                ProcessRawInput(latestLParam, includeMouseMovement: false);
+                _ = DefWindowProcW(hwnd, WmInput, latestWParam, latestLParam);
+                latestWParam = queued.WParam;
+                latestLParam = queued.LParam;
+            }
+            else
+            {
+                // Do not discard keyboard input while draining mouse backlog.
+                ProcessRawInput(queued.LParam);
+                _ = DefWindowProcW(hwnd, WmInput, queued.WParam, queued.LParam);
+            }
+        }
+
+        ProcessRawInput(latestLParam);
+        _ = DefWindowProcW(hwnd, WmInput, latestWParam, latestLParam);
     }
 
     private void HandleRawButton(byte button, bool down)
@@ -1806,6 +1935,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void AddRawControlDelta(double dx, double dy)
     {
+        if (!IsBluetoothControlActiveFor(_activeControlWindow != 0
+                ? _activeControlUdid : _viewModel.SelectedDevice?.Udid))
+            return;
         var scaledX = dx + _controlRemainderX;
         var scaledY = dy + _controlRemainderY;
         var sendX = (int)Math.Truncate(scaledX);
@@ -1815,13 +1947,34 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         if (sendX == 0 && sendY == 0) return;
         lock (_controlQueueSync)
         {
-            _pendingControlDx = Math.Clamp(_pendingControlDx + sendX, -32767, 32767);
-            _pendingControlDy = Math.Clamp(_pendingControlDy + sendY, -32767, 32767);
+            DropStalePendingControlMotion();
+            // Raw input arrives independently of the WPF render loop. Keep
+            // only its newest relative sample, exactly as the preview-pointer
+            // path does. Accumulating deltas here would recreate a pointer
+            // backlog before the one-slot Bluetooth sender can coalesce it.
+            _pendingControlDx = Math.Clamp(_pendingControlDx + sendX,
+                -32767, 32767);
+            _pendingControlDy = Math.Clamp(_pendingControlDy + sendY,
+                -32767, 32767);
             _pendingControlButtons = _controlButtons;
             if (_pendingControlMotionAt == 0)
                 _pendingControlMotionAt = Stopwatch.GetTimestamp();
         }
         StartControlPointerTimer();
+    }
+
+    private void DropStalePendingControlMotion()
+    {
+        if (_pendingControlMotionAt == 0) return;
+        var ageMs = (Stopwatch.GetTimestamp() - _pendingControlMotionAt) *
+            1000.0 / Stopwatch.Frequency;
+        if (ageMs <= 50) return;
+        // Relative deltas are disposable. Once the dispatcher or BLE stack
+        // has been blocked for a frame, replaying them draws a stale
+        // rectangle and moves the phone after the physical mouse stopped.
+        _pendingControlDx = 0;
+        _pendingControlDy = 0;
+        _pendingControlMotionAt = 0;
     }
 
     private static (double X, double Y) MapMouseDeltaToDeviceOrientation(
@@ -2597,7 +2750,17 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         _refreshTimer.Stop();
         _mediaCastTimer.Stop();
         var application = Application.Current;
-        application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        if (!application.Dispatcher.HasShutdownStarted &&
+            !application.Dispatcher.HasShutdownFinished)
+        {
+            try { application.ShutdownMode = ShutdownMode.OnExplicitShutdown; }
+            catch (InvalidOperationException error)
+            {
+                _viewModel.AddDiagnosticLog(AppLog.Event(
+                    "main_window_shutdown_mode_update_skipped",
+                    ("error", AppLog.Error(error))));
+            }
+        }
         foreach (Window window in application.Windows.Cast<Window>().ToArray())
         {
             try { window.Hide(); }
@@ -2650,7 +2813,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 var shutdownLimit = (Application.Current as App)?
                     .IsSystemSessionEnding == true
                     ? TimeSpan.FromSeconds(4)
-                    : TimeSpan.FromSeconds(15);
+                    : TimeSpan.FromSeconds(8);
                 try
                 {
                     await shutdown.WaitAsync(shutdownLimit);
@@ -5566,6 +5729,12 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            if (!Dispatcher.HasShutdownStarted)
+                _ = Dispatcher.BeginInvoke(() => OnViewModelPropertyChanged(sender, e));
+            return;
+        }
         if (e.PropertyName is nameof(MainViewModel.IsLightweightApplicationMode) or
             nameof(MainViewModel.IsCapturing) or
             nameof(MainViewModel.IsMediaCasting) or
@@ -5608,7 +5777,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _activeControlUdid = _viewModel.BluetoothControlTargetUdid;
                 if (IsLoaded) _refreshTimer.Start();
             }
-            else if (!_viewModel.IsBluetoothControlEnabled)
+            else if (!_viewModel.IsBluetoothControlEnabled &&
+                     !_viewModel.IsUsbControlEnabled)
             {
                 _activeControlWindow = 0;
                 _activeControlUdid = null;
@@ -5692,6 +5862,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         // owns the active control route.
         SetWindowsCursorHidden(controlActive && !usbControlConnected);
         SetSystemKeySuppression(controlActive);
+        // The main preview uses Raw Input; independent native previews forward
+        // their own WM_MOUSEMOVE stream. Both are normalized to source pixels
+        // before sensitivity is applied, but registering both would duplicate
+        // every movement from an independent window.
         RegisterRawInput(controlActive && _activeControlWindow == 0,
             (controlActive || usbControlActive) && _activeControlWindow == 0);
         if (controlActive && _activeControlWindow != 0)
@@ -5702,17 +5876,35 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         }
         else if (!controlActive && !usbControlActive)
             ClearBluetoothControlInputState();
+        if (controlActive)
+            ClipWindowsCursorToControlSurface();
     }
 
     private void ClearBluetoothControlInputState()
     {
         // Hiding a native window or losing its Bluetooth route does not restore
         // process-wide cursor, keyboard, raw-input, or clipping state by itself.
+        MainPreviewHost.ReleasePointerCapture();
         MainPreviewHost.CapturePointerInput = false;
         SetWindowsCursorHidden(false);
         SetSystemKeySuppression(false);
         RegisterRawInput(false, false);
+        _ = ReleaseCapture();
         ClipCursor(IntPtr.Zero);
+        // A pointer callback can pass the active-route check just before F9
+        // disables Bluetooth. Reassert the global cleanup after queued input
+        // callbacks have drained so capture/clipping cannot remain stuck.
+        if (!Dispatcher.HasShutdownStarted)
+            _ = Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+            {
+                if (!IsBluetoothControlActive && !IsUsbControlActive)
+                {
+                    MainPreviewHost.ReleasePointerCapture();
+                    _ = ReleaseCapture();
+                    ClipCursor(IntPtr.Zero);
+                    MainPreviewHost.CapturePointerInput = false;
+                }
+            }));
         ResetControlRouteState();
         // Reset the pressed/pending state of every USB touch target: this
         // route reset is global (window hidden, pointer route lost), so no
@@ -6976,7 +7168,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void ToggleBluetoothControlFromHotkey()
     {
-        BluetoothControlNoticeWindow.TryCloseActive();
+        _viewModel.ControlStatus.ResolvePrompt(new(ControlPromptAction.Cancel));
         ShowReverseControlStatus(ControlStatusMode.Bluetooth);
         _ = _viewModel.ToggleBluetoothControlAsync();
     }
@@ -6986,8 +7178,22 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         if (mode == ControlStatusMode.Bluetooth && _viewModel.IsBluetoothControlEnabled) return;
         if (mode == ControlStatusMode.Usb && _viewModel.IsUsbControlEnabled) return;
         if (mode == ControlStatusMode.Wireless && _viewModel.IsWirelessControlEnabled) return;
+        if (_viewModel.ControlStatus.Current is { IsTerminal: false } current)
+        {
+            if (current.Mode == mode)
+                ReverseControlStatusWindow.Show(this, _viewModel.ControlStatus,
+                    () => _ = _viewModel.CancelReverseControlAsync(mode),
+                    countdownElapsed: mode == ControlStatusMode.Bluetooth
+                        ? _viewModel.BeginBluetoothControlInputAfterStatusCountdown
+                        : null);
+            return;
+        }
         _viewModel.ControlStatus.Begin(mode, _viewModel.SelectedDevice?.Name ?? "iPhone");
-        ReverseControlStatusWindow.Show(this, _viewModel.ControlStatus);
+        ReverseControlStatusWindow.Show(this, _viewModel.ControlStatus,
+            () => _ = _viewModel.CancelReverseControlAsync(mode),
+            countdownElapsed: mode == ControlStatusMode.Bluetooth
+                ? _viewModel.BeginBluetoothControlInputAfterStatusCountdown
+                : null);
     }
 
     private void HandleConfiguredShortcut(BluetoothShortcutAction action)
@@ -7132,9 +7338,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 _viewModel.IsUsbControlTarget(target);
             if (!bluetoothTarget && !usbTarget) return;
             if (action == BluetoothShortcutAction.AppSwitcher && bluetoothTarget)
-                await _viewModel.SendBluetoothAppSwitcherAsync();
+                await _viewModel.SendBluetoothAppSwitcherAsync(target);
             else if (usage != 0 && bluetoothTarget)
-                await _viewModel.SendBluetoothSystemShortcutAsync(usage);
+                await _viewModel.SendBluetoothSystemShortcutAsync(usage, target);
             if (action == BluetoothShortcutAction.AppSwitcher && usbTarget)
             {
                 // iPhone/iPad accepts the hardware Home button twice as the
@@ -7203,21 +7409,44 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     {
         if (hidden)
         {
-            if (IsSystemCursorVisible(out var queryFailed))
-                while (ShowCursor(false) >= 0) { }
-            else if (queryFailed && !_windowsCursorHidden)
-                ShowCursor(false);
+            if (_windowsCursorHidden) return;
+            // GetCursorInfo can fail while a native preview owns the input
+            // queue. Use ShowCursor's reversible display count directly.
+            _cursorHideShowCalls = 0;
+            while (_cursorHideShowCalls < 32 && ShowCursor(false) >= 0)
+                _cursorHideShowCalls++;
+            _cursorHideShowCalls++;
             _windowsCursorHidden = true;
         }
         else
         {
-            if (!IsSystemCursorVisible(out var queryFailed))
-            {
-                if (queryFailed && _windowsCursorHidden) ShowCursor(true);
-                else while (ShowCursor(true) < 0) { }
-            }
+            if (!_windowsCursorHidden) return;
+            for (var i = 0; i < _cursorHideShowCalls; i++) ShowCursor(true);
+            _cursorHideShowCalls = 0;
             _windowsCursorHidden = false;
         }
+    }
+
+    private void ClipWindowsCursorToControlSurface()
+    {
+        if (!IsBluetoothControlActive) return;
+        var handle = _activeControlWindow != 0
+            ? _activeControlWindow : MainPreviewHost.WindowHandle;
+        if (handle == 0 || !GetWindowRect(handle, out var bounds) ||
+            bounds.Right <= bounds.Left || bounds.Bottom <= bounds.Top)
+            return;
+        // Clip the hidden Windows cursor to the active preview. Raw Input is
+        // still delivered as relative motion, but the physical cursor cannot
+        // leave the controlled surface and click another application.
+        if (!ClipCursor(ref bounds))
+            _viewModel.AddDiagnosticLog(AppLog.Event("control_cursor_clip_failed",
+                ("win32_error", Marshal.GetLastWin32Error()),
+                ("window", AppLog.Handle((ulong)handle.ToInt64()))));
+        _ = SetCapture(handle);
+        if (GetCapture() != handle)
+            _viewModel.AddDiagnosticLog(AppLog.Event("control_mouse_capture_failed",
+                ("win32_error", Marshal.GetLastWin32Error()),
+                ("window", AppLog.Handle((ulong)handle.ToInt64()))));
     }
 
     private bool IsSystemCursorVisible(out bool queryFailed)
@@ -7310,6 +7539,19 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         internal uint Size;
         internal nint Device;
         internal nint WParam;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeMessage
+    {
+        internal nint Hwnd;
+        internal uint Message;
+        internal nint WParam;
+        internal nint LParam;
+        internal uint Time;
+        internal int PointX;
+        internal int PointY;
+        internal uint Private;
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 24)]
@@ -7424,6 +7666,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         nint data, ref uint size, uint headerSize);
 
     [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PeekMessageW(ref NativeMessage message, nint window,
+        uint minMessage, uint maxMessage, uint removeMessage);
+
+    [DllImport("user32.dll")]
     private static extern nint DefWindowProcW(nint window, int message,
         nint wParam, nint lParam);
 
@@ -7441,6 +7688,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ClipCursor(nint rect);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetCapture();
+
+    [DllImport("user32.dll")]
+    private static extern nint SetCapture(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReleaseCapture();
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

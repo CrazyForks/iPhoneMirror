@@ -455,8 +455,6 @@ void WirelessClientStream::publish_video(const wireless::MessageHeader& header,
     // AirPlay screen mirroring publishes full-range I420. Treating these
     // samples as video-range expands light UI grays (for example 243) to 255.
     frame->color.range = coremedia::ColorRange::Full;
-    frame->timestamp_100ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        received_at - started_at_).count() / 100;
     frame->received_at = received_at;
 
     std::scoped_lock lock(mutex_);
@@ -464,6 +462,8 @@ void WirelessClientStream::publish_video(const wireless::MessageHeader& header,
     // Re-check the connection while holding the stream lock so a late frame
     // cannot repopulate a device that was just cleared.
     if (!connected_) return;
+    frame->timestamp_100ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        received_at - started_at_).count() / 100;
     const bool format_changed = snapshot_.width != 0 && snapshot_.height != 0 &&
         (snapshot_.width != header.width || snapshot_.height != header.height);
     if (format_changed) {
@@ -675,14 +675,19 @@ void WirelessReceiverHub::start(std::wstring receiver_name, std::wstring host_pa
         std::scoped_lock lock(playback_mutex_);
         playback_update_ = {};
     }
-    logging::write(std::format(
-        "wireless_hub host_started pid={} receiver_fp={} capability={}x{}@{} "
-        "mode=combined host_file={}", process.dwProcessId,
-        anonymous_label(receiver_name_), width, height, frame_rate,
-        narrow(std::filesystem::path(host_path_).filename().wstring())));
-    worker_ = std::jthread([this](std::stop_token token) { run(token); });
-    playback_worker_ = std::jthread(
-        [this](std::stop_token token) { run_playback_writer(token); });
+    try {
+        logging::write(std::format(
+            "wireless_hub host_started pid={} receiver_fp={} capability={}x{}@{} "
+            "mode=combined host_file={}", process.dwProcessId,
+            anonymous_label(receiver_name_), width, height, frame_rate,
+            narrow(std::filesystem::path(host_path_).filename().wstring())));
+        worker_ = std::jthread([this](std::stop_token token) { run(token); });
+        playback_worker_ = std::jthread(
+            [this](std::stop_token token) { run_playback_writer(token); });
+    } catch (...) {
+        stop_locked();
+        throw;
+    }
 }
 
 void WirelessReceiverHub::stop() noexcept {

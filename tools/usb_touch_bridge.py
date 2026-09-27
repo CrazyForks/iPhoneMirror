@@ -498,8 +498,7 @@ def _github_request_json(url: str, proxy: Optional[str] = None) -> object:
 def _resolve_github_personalized_ddi_assets() -> tuple[PersonalizedDdiAsset, ...]:
     """Resolve the current GitHub DDI directory and bind it to this runtime build.
 
-    GitHub's directory API supplies a blob id, while the cache uses the
-    stronger pinned SHA-256 and size checks for downloaded payloads.
+    GitHub's directory API supplies the expected Git blob ID for each asset.
     """
     ref_url = PERSONALIZED_DDI_GITHUB_COMMIT_API_URL.format(
         ref=quote(PERSONALIZED_DDI_GITHUB_REF, safe=''))
@@ -532,7 +531,8 @@ def _resolve_github_personalized_ddi_assets() -> tuple[PersonalizedDdiAsset, ...
         item = by_name.get(upstream_name)
         size = item.get('size') if isinstance(item, dict) else None
         blob_id = item.get('sha') if isinstance(item, dict) else None
-        if not isinstance(size, int) or size <= 0 or not isinstance(blob_id, str):
+        if not isinstance(size, int) or size <= 0 or not isinstance(blob_id, str) or \
+                len(blob_id) != 40 or any(c not in '0123456789abcdef' for c in blob_id):
             raise BridgePrerequisiteError(
                 'developer_image_download_incompatible',
                 f'GitHub DDI metadata is missing {upstream_name}.',
@@ -615,7 +615,8 @@ def _valid_personalized_ddi_bundle(root: Path) -> Optional[tuple[Path, Path, Pat
             path = root / asset.local_name
             if not path.is_file() or path.stat().st_size != asset.size:
                 return None
-            if not asset.sha256 or _sha256_file(path) != asset.sha256:
+            if not asset.sha256 or _sha256_file(path) != asset.sha256 or \
+                    _git_blob_sha1_file(path, asset.size) != asset.blob_id:
                 return None
             paths.append(path)
         build_manifest = plistlib.loads(paths[1].read_bytes())
@@ -625,6 +626,14 @@ def _valid_personalized_ddi_bundle(root: Path) -> Optional[tuple[Path, Path, Pat
             build_manifest.get('ProductBuildVersion') != LATEST_DDI_BUILD_ID:
         return None
     return tuple(root / name for name in PERSONALIZED_DDI_FILES)
+
+
+def _git_blob_sha1_file(path: Path, size: int) -> str:
+    digest = hashlib.sha1(f'blob {size}\0'.encode('ascii'))
+    with path.open('rb') as source:
+        for chunk in iter(lambda: source.read(PERSONALIZED_DDI_DOWNLOAD_CHUNK_BYTES), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _ddi_source_headers(source: PersonalizedDdiDownloadSource) -> dict[str, str]:
@@ -885,6 +894,7 @@ def _download_personalized_ddi_asset(
                     f'{source.name} returned an unexpected size for {asset.local_name}.',
                 )
             digest = hashlib.sha256()
+            blob_digest = hashlib.sha1(f'blob {asset.size}\0'.encode('ascii'))
             received = 0
             with destination.open('xb') as output:
                 for chunk in response.iter_content(
@@ -898,14 +908,16 @@ def _download_personalized_ddi_asset(
                             f'{source.name} exceeded the pinned size for {asset.local_name}.',
                         )
                     digest.update(chunk)
+                    blob_digest.update(chunk)
                     output.write(chunk)
                 output.flush()
                 os.fsync(output.fileno())
             actual_sha256 = digest.hexdigest()
-            if received != asset.size or (asset.sha256 and actual_sha256 != asset.sha256):
+            if received != asset.size or blob_digest.hexdigest() != asset.blob_id or \
+                    (asset.sha256 and actual_sha256 != asset.sha256):
                 raise BridgePrerequisiteError(
                     'developer_image_download_integrity_failed',
-                    f'{source.name} failed size/SHA-256 verification for {asset.local_name} '
+                    f'{source.name} failed Git blob/SHA-256 verification for {asset.local_name} '
                     f'(sha256={actual_sha256}).',
                 )
     except BridgePrerequisiteError:
@@ -2587,10 +2599,31 @@ class TouchSession:
                 await self._send_touch_report(report)
 
     async def _cleanup(self) -> None:
-        # Release the capture usbmux before closing the longer-lived CoreDevice
-        # scopes below.  The host gives the bridge a bounded shutdown window;
-        # leaving the claimed interface until the end makes an immediate
-        # second reverse-control start race the old process teardown.
+        # 强制释放所有触点（异常清理）
+        if self.hid is not None:
+            try:
+                if self.keyboard_service_id is not None:
+                    await self.hid.send_keyboard(self.keyboard_service_id, [])
+            except Exception:
+                pass
+        if self.hid is not None:
+            try:
+                for slot in range(MAX_SLOTS):
+                    report = build_touchscreen_report(slot, TOUCHSCREEN_STATE_RELEASE, 0, 0)
+                    await self.hid.send_report(DIGITIZER_SURFACE_MAIN_TOUCHSCREEN, report)
+            except Exception:
+                pass
+            if self._owns_hid:
+                try:
+                    await self.hid.__aexit__(None, None, None)
+                except Exception:
+                    pass
+        if self.indigo is not None:
+            try:
+                await self.indigo.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self.indigo = None
         if self._usb_mux_server is not None:
             with contextlib.suppress(Exception):
                 self._usb_mux_server.stop()
@@ -2604,32 +2637,6 @@ class TouchSession:
         else:
             os.environ['USBMUXD_SOCKET_ADDRESS'] = self._usb_mux_previous_env
         self._usb_mux_previous_env = None
-
-        # 强制释放所有触点（异常清理）
-        if self.hid is not None:
-            try:
-                if self.keyboard_service_id is not None:
-                    await self.hid.send_keyboard(self.keyboard_service_id, [])
-            except Exception:
-                pass
-        if self.indigo is not None:
-            try:
-                await self.indigo.__aexit__(None, None, None)
-            except Exception:
-                pass
-            self.indigo = None
-        if self.hid is not None:
-            try:
-                for slot in range(MAX_SLOTS):
-                    report = build_touchscreen_report(slot, TOUCHSCREEN_STATE_RELEASE, 0, 0)
-                    await self.hid.send_report(DIGITIZER_SURFACE_MAIN_TOUCHSCREEN, report)
-            except Exception:
-                pass
-            if self._owns_hid:
-                try:
-                    await self.hid.__aexit__(None, None, None)
-                except Exception:
-                    pass
         if self.drain_task is not None:
             self.drain_task.cancel()
             try:

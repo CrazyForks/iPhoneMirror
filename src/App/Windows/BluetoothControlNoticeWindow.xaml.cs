@@ -24,6 +24,7 @@ public sealed partial class BluetoothControlNoticeWindow :
     private string? _prerequisiteTitle;
     private string? _prerequisiteBody;
     private int _remainingSeconds = 5;
+    private DateTime _closeAtUtc;
 
     public string TitleText => _state == NoticeState.Prerequisite
         ? _prerequisiteTitle ?? string.Empty
@@ -254,9 +255,12 @@ public sealed partial class BluetoothControlNoticeWindow :
     private void OnCloseTimerTick(object? sender, EventArgs e)
     {
         if (_state != NoticeState.Connected) return;
-        _remainingSeconds--;
+        // DispatcherTimer ticks may be delayed while Bluetooth callbacks are
+        // being processed. Use wall-clock time so a delayed tick catches up.
+        _remainingSeconds = (int)Math.Ceiling((_closeAtUtc - DateTime.UtcNow).TotalSeconds);
         if (_remainingSeconds <= 0)
         {
+            _closeTimer.Stop();
             Close();
             return;
         }
@@ -265,6 +269,14 @@ public sealed partial class BluetoothControlNoticeWindow :
 
     private void SetState(NoticeState state)
     {
+        // Status callbacks can repeat while the Bluetooth route is settling.
+        // Do not restart the already-running five-second close deadline on
+        // every callback, otherwise the countdown appears stuck at 5.
+        if (state == NoticeState.Connected && _state == NoticeState.Connected &&
+            _closeTimer.IsEnabled)
+        {
+            return;
+        }
         _state = state;
         // Keep the original dialog width. When the pairing checklist hides,
         // remeasure only the height so the connected notice loses the empty
@@ -274,7 +286,11 @@ public sealed partial class BluetoothControlNoticeWindow :
         Width = WaitingWidth;
         _remainingSeconds = 5;
         _closeTimer.Stop();
-        if (state == NoticeState.Connected) _closeTimer.Start();
+        if (state == NoticeState.Connected)
+        {
+            _closeAtUtc = DateTime.UtcNow.AddSeconds(5);
+            _closeTimer.Start();
+        }
         OnPropertyChanged(nameof(TitleText));
         OnPropertyChanged(nameof(BodyText));
         OnPropertyChanged(nameof(DetailText));

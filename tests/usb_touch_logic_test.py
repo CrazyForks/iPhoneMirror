@@ -377,10 +377,11 @@ class TestPersonalizedDdiMirrorDownloads(unittest.TestCase):
         self.assertEqual(raised.exception.code,
                          'developer_image_download_integrity_failed')
 
-    def test_download_accepts_matching_sha256_even_when_blob_id_metadata_differs(self):
+    def test_download_accepts_matching_sha256_and_git_blob(self):
         payload = b'verified DDI test payload'
+        blob_id = hashlib.sha1(f'blob {len(payload)}\0'.encode('ascii') + payload).hexdigest()
         asset = self.bridge.PersonalizedDdiAsset(
-            'Image.trustcache', 'Image.dmg.trustcache', 'stale-blob-id',
+            'Image.trustcache', 'Image.dmg.trustcache', blob_id,
             len(payload), hashlib.sha256(payload).hexdigest(), 'revision')
         source = self.bridge.PersonalizedDdiDownloadSource(
             'test-mirror', 'mirror', 'https://mirror.invalid/')
@@ -398,6 +399,30 @@ class TestPersonalizedDdiMirrorDownloads(unittest.TestCase):
             destination = Path(directory) / 'asset.download'
             self.bridge._download_personalized_ddi_asset(source, asset, destination)
             self.assertEqual(destination.read_bytes(), payload)
+
+    def test_download_rejects_same_size_payload_with_wrong_github_blob(self):
+        payload = b'correct content'
+        blob_id = hashlib.sha1(f'blob {len(payload)}\0'.encode('ascii') + payload).hexdigest()
+        asset = self.bridge.PersonalizedDdiAsset(
+            'Image.trustcache', 'Image.dmg.trustcache', blob_id,
+            len(payload), None, 'revision')
+        source = self.bridge.PersonalizedDdiDownloadSource('test', 'raw')
+
+        class Response:
+            status_code = 200
+            headers = {'Content-Length': str(len(payload))}
+            url = 'https://raw.githubusercontent.com/test'
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def iter_content(self, chunk_size): yield b'corrupt content'
+
+        with TemporaryDirectory() as directory, patch.object(
+                self.bridge.requests, 'get', return_value=Response()):
+            with self.assertRaises(self.bridge.BridgePrerequisiteError) as raised:
+                self.bridge._download_personalized_ddi_asset(
+                    source, asset, Path(directory) / 'asset.download')
+        self.assertEqual(raised.exception.code,
+                         'developer_image_download_integrity_failed')
 
 
 class TestDeveloperEnvironmentPreflight(unittest.IsolatedAsyncioTestCase):
@@ -1571,6 +1596,78 @@ class TestTouchSessionCleanup(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hid.exited)
         self.assertIsNone(session.hid)
         self.assertFalse(session._owns_hid)
+
+    async def test_hid_releases_precede_usb_mux_close(self):
+        import usb_touch_bridge as bridge
+        events = []
+
+        class Hid:
+            async def send_keyboard(self, _service_id, _usages):
+                events.append('keyboard')
+            async def send_report(self, _service_id, _report):
+                events.append('touch')
+        class Server:
+            def stop(self): events.append('server')
+        class Transport:
+            def close(self): events.append('transport')
+
+        session = bridge.TouchSession(None, 120, udid='trusted-device')
+        session.hid = Hid()
+        session.keyboard_service_id = 1
+        session._usb_mux_server = Server()
+        session._usb_mux_transport = Transport()
+        await session._cleanup()
+        self.assertEqual(events[:1], ['keyboard'])
+        self.assertEqual(events[1:1 + bridge.MAX_SLOTS],
+                         ['touch'] * bridge.MAX_SLOTS)
+        self.assertEqual(events[-2:], ['server', 'transport'])
+
+
+class TestMuxConnectionLifecycle(unittest.TestCase):
+    def setUp(self):
+        from iostouch.qt import usbmux_usb as mux
+        self.mux = mux
+        self.device = mux.MuxDevice(lambda _data: None)
+        self.connection = mux.MuxConnection(self.device, 5000, 62078)
+        self.connection.state = 'connected'
+        self.device._conns[self.connection.sport] = self.connection
+
+    def test_fin_payload_is_delivered_and_connection_is_forgotten(self):
+        segment = self.mux.TcpSegment(62078, 5000, 42, 0,
+                                      self.mux.TH_FIN | self.mux.TH_ACK,
+                                      65535, b'final response')
+        with patch.object(self.device, '_send_tcp') as send:
+            self.connection._on_segment(segment)
+        self.assertEqual(self.connection.recv(), b'final response')
+        self.assertEqual(self.connection.recv(), b'')
+        self.assertNotIn(5000, self.device._conns)
+        self.assertEqual(self.connection.tx_ack, 42 + len(b'final response') + 1)
+        send.assert_called_once_with(self.connection, self.mux.TH_ACK)
+
+    def test_rst_and_later_close_do_not_leave_a_dead_connection(self):
+        segment = self.mux.TcpSegment(62078, 5000, 42, 0,
+                                      self.mux.TH_RST, 65535, b'')
+        self.connection._on_segment(segment)
+        self.connection.close()
+        self.assertNotIn(5000, self.device._conns)
+
+    def test_reader_failure_aborts_waiting_connections_without_writing(self):
+        with patch.object(self.device, '_send_tcp') as send:
+            self.device.abort_all('USB read failed')
+        self.assertEqual(self.connection.recv(), b'')
+        self.assertTrue(self.connection.closed)
+        self.assertNotIn(5000, self.device._conns)
+        send.assert_not_called()
+        with self.assertRaises(self.mux.MuxError):
+            self.device.connect(62078, timeout=0)
+
+    def test_failed_syn_write_does_not_leak_a_source_port(self):
+        device = self.mux.MuxDevice(lambda _data: (_ for _ in ()).throw(
+            OSError('USB write failed')))
+        device.ready.set()
+        with self.assertRaises(OSError):
+            device.connect(62078, timeout=0)
+        self.assertEqual(device._conns, {})
 
 
 class TestWifiSyncProvisioning(unittest.IsolatedAsyncioTestCase):

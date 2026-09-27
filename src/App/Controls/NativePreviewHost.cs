@@ -8,6 +8,8 @@ namespace IPhoneMirror.App.Controls;
 internal sealed class NativePreviewHost : HwndHost
 {
     private const int WmNcHitTest = 0x0084;
+    private const int WmMouseMove = 0x0200;
+    private const uint PmRemove = 0x0001;
     private const int WmEraseBackground = 0x0014;
     private const int HtTransparent = -1;
     private const int WsChild = 0x40000000;
@@ -26,6 +28,17 @@ internal sealed class NativePreviewHost : HwndHost
 
     internal bool CapturePointerInput { get; set; }
     internal bool SuppressMouseMove { get; set; }
+    // Raw Input owns button and wheel transitions while Bluetooth control is
+    // active. Suppress legacy messages that leak from the child HWND so a
+    // duplicate up/down cannot overwrite the HID button state.
+    internal bool SuppressLegacyMouseButtons { get; set; }
+
+    internal void ReleasePointerCapture()
+    {
+        _capturedMouseButtons = 0;
+        if (_window != 0 && GetCapture() == _window)
+            _ = ReleaseCapture();
+    }
     internal bool IsFullScreenPresentation
     {
         get => _isFullScreenPresentation;
@@ -172,12 +185,13 @@ internal sealed class NativePreviewHost : HwndHost
             }
             switch (message)
             {
-                case 0x0200: // WM_MOUSEMOVE
+                case WmMouseMove:
                     if (SuppressMouseMove)
                     {
                         handled = true;
                         return 0;
                     }
+                    lParam = DrainQueuedMouseMoves(_window, lParam);
                     PointerInput?.Invoke(this, new PreviewPointerEventArgs(
                         PreviewPointerKind.Move, GetSignedLowWord(lParam),
                         GetSignedHighWord(lParam), 0, 0, GetClientWidth(),
@@ -187,6 +201,11 @@ internal sealed class NativePreviewHost : HwndHost
                 case 0x0201: // WM_LBUTTONDOWN
                 case 0x0204: // WM_RBUTTONDOWN
                 case 0x0207: // WM_MBUTTONDOWN
+                    if (SuppressLegacyMouseButtons)
+                    {
+                        handled = true;
+                        return 0;
+                    }
                     _capturedMouseButtons |= MouseButtonFromMessage(message);
                     _ = SetCapture(_window);
                     PointerInput?.Invoke(this, new PreviewPointerEventArgs(
@@ -198,6 +217,11 @@ internal sealed class NativePreviewHost : HwndHost
                 case 0x0202: // WM_LBUTTONUP
                 case 0x0205: // WM_RBUTTONUP
                 case 0x0208: // WM_MBUTTONUP
+                    if (SuppressLegacyMouseButtons)
+                    {
+                        handled = true;
+                        return 0;
+                    }
                     _capturedMouseButtons = (byte)(_capturedMouseButtons & ~MouseButtonFromMessage(message));
                     PointerInput?.Invoke(this, new PreviewPointerEventArgs(
                         PreviewPointerKind.ButtonUp, GetSignedLowWord(lParam),
@@ -207,6 +231,11 @@ internal sealed class NativePreviewHost : HwndHost
                     handled = true;
                     return 0;
                 case 0x020A: // WM_MOUSEWHEEL
+                    if (SuppressLegacyMouseButtons)
+                    {
+                        handled = true;
+                        return 0;
+                    }
                     PointerInput?.Invoke(this, new PreviewPointerEventArgs(
                         PreviewPointerKind.Wheel, GetSignedLowWord(lParam),
                         GetSignedHighWord(lParam), 0, (short)((long)wParam >> 16),
@@ -262,6 +291,15 @@ internal sealed class NativePreviewHost : HwndHost
         return Math.Max(1, rect.Bottom - rect.Top);
     }
 
+    private static nint DrainQueuedMouseMoves(nint hwnd, nint currentLParam)
+    {
+        var latest = currentLParam;
+        var queued = new NativeMessage();
+        while (PeekMessageW(ref queued, hwnd, WmMouseMove, WmMouseMove, PmRemove))
+            latest = queued.LParam;
+        return latest;
+    }
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern nint CreateWindowExW(int exStyle, string className, string windowName,
         int style, int x, int y, int width, int height, nint parent, nint menu,
@@ -280,9 +318,27 @@ internal sealed class NativePreviewHost : HwndHost
         internal int Bottom;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeMessage
+    {
+        internal nint Hwnd;
+        internal uint Message;
+        internal nint WParam;
+        internal nint LParam;
+        internal uint Time;
+        internal int PointX;
+        internal int PointY;
+        internal uint Private;
+    }
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetClientRect(nint window, out NativeRect rect);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PeekMessageW(ref NativeMessage message, nint window,
+        uint minMessage, uint maxMessage, uint removeMessage);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -304,6 +360,9 @@ internal sealed class NativePreviewHost : HwndHost
 
     [DllImport("user32.dll")]
     private static extern nint SetCapture(nint window);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetCapture();
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

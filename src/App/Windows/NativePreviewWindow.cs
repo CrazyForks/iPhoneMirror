@@ -35,6 +35,7 @@ internal sealed class NativePreviewWindow : IDisposable
     private const int WmClose = 0x0010;
     private const int WmEraseBackground = 0x0014;
     private const int WmMouseMove = 0x0200;
+    private const uint PmRemove = 0x0001;
     private const int WmLeftButtonDown = 0x0201;
     private const int WmLeftButtonUp = 0x0202;
     private const int WmMiddleButtonDown = 0x0207;
@@ -712,6 +713,7 @@ internal sealed class NativePreviewWindow : IDisposable
         switch (message)
         {
             case WmMouseMove when IsPointerInputActive:
+                lParam = DrainQueuedMouseMoves(hwnd, lParam);
                 DispatchPointer(PreviewPointerKind.Move, lParam, 0, 0);
                 handled = true;
                 return 0;
@@ -1132,6 +1134,15 @@ internal sealed class NativePreviewWindow : IDisposable
             sourceWidth, sourceHeight, _rotation));
     }
 
+    private static nint DrainQueuedMouseMoves(nint hwnd, nint currentLParam)
+    {
+        var latest = currentLParam;
+        var queued = new NativeMessage();
+        while (PeekMessageW(ref queued, hwnd, WmMouseMove, WmMouseMove, PmRemove))
+            latest = queued.LParam;
+        return latest;
+    }
+
     private void ToggleCorners()
     {
         if (_managedContent is not null || _sessionHandle == 0 || _handle == 0) return;
@@ -1249,12 +1260,30 @@ internal sealed class NativePreviewWindow : IDisposable
         internal uint Flags;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeMessage
+    {
+        internal nint Hwnd;
+        internal uint Message;
+        internal nint WParam;
+        internal nint LParam;
+        internal uint Time;
+        internal int PointX;
+        internal int PointY;
+        internal uint Private;
+    }
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowTextW(nint window, string text);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern nint SendMessageW(nint window, int message, nint wParam, nint lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PeekMessageW(ref NativeMessage message, nint window,
+        uint minMessage, uint maxMessage, uint removeMessage);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]

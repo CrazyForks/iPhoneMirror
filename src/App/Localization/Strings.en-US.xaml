@@ -137,6 +137,7 @@
     <system:String x:Key="ReverseControlUsbEnabled">USB control enabled</system:String>
     <system:String x:Key="ReverseControlUsbConnected">USB control connected (device authentication status should be verified in practice)</system:String>
     <system:String x:Key="ReverseControlUsbFailedFormat">USB control connection failed: {0}</system:String>
+    <system:String x:Key="ReverseControlUsbBindingChanged">The USB device binding changed. Enable control again.</system:String>
     <system:String x:Key="ReverseControlUsbStopping">Stopping USB control</system:String>
     <system:String x:Key="ReverseControlUsbOff">USB control is off</system:String>
     <system:String x:Key="ReverseControlUsbStopFailedFormat">USB control shutdown failed: {0}</system:String>
@@ -273,6 +274,9 @@
     <system:String x:Key="BluetoothControlFailedBody">Windows could not start the BLE HID peripheral service. Check whether the Bluetooth adapter and driver support peripheral mode.</system:String>
     <system:String x:Key="BluetoothControlFailedStatus">Startup failed</system:String>
     <system:String x:Key="ReverseControlErrorTitle">Reverse control error</system:String>
+    <system:String x:Key="ReverseControlTitle">Reverse control</system:String>
+    <system:String x:Key="ReverseControlDetails">View details</system:String>
+    <system:String x:Key="ReverseControlRetry">Retry</system:String>
     <system:String x:Key="ReverseControlStartErrorTitle">Reverse control could not start</system:String>
     <system:String x:Key="ReverseControlRecoveryErrorTitle">Reverse control disconnected</system:String>
     <system:String x:Key="ReverseControlStopErrorTitle">Reverse control shutdown issue</system:String>

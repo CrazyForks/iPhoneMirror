@@ -666,6 +666,7 @@ private:
     }
 
     void ensure_connected() {
+        std::scoped_lock send_lock(send_mutex_);
         ClientIdentity identity;
         bool should_send{};
         {
