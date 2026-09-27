@@ -2,6 +2,8 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:system="clr-namespace:System;assembly=mscorlib">
     <FontFamily x:Key="NavigationTextFontFamily">Microsoft YaHei UI</FontFamily>
+    <system:String x:Key="AccentFillBrush">#FF3B82F6</system:String>
+    <system:String x:Key="AccentTextBrush">#FFFFFFFF</system:String>
     <system:String x:Key="WindowTitle">iPhoneMirror — USB iPhone/iPad 投屏</system:String>
     <system:String x:Key="AppSubtitle">Windows 有线 iPhone/iPad 屏幕采集</system:String>
     <system:String x:Key="LanguageSystem">跟随系统</system:String>
