@@ -222,9 +222,24 @@ function Invoke-NativeToolWithSanitizedEnvironment(
     # Do not reconnect to long-lived MSBuild worker nodes that may have been
     # created before the environment was sanitized.
     $startInfo.Environment['MSBUILDDISABLENODEREUSE'] = '1'
-    foreach ($argument in $ArgumentList) {
-        [void]$startInfo.ArgumentList.Add($argument)
+    # ArgumentList is unavailable on the .NET Framework ProcessStartInfo used by
+    # Windows PowerShell 5.1. Fall back to a Windows-command-line-safe string so
+    # release builds work on both PowerShell hosts.
+    $quotedArguments = foreach ($argument in $ArgumentList) {
+        $value = [string]$argument
+        if ([string]::IsNullOrEmpty($value)) {
+            '""'
+        }
+        elseif ($value -notmatch '[\s"]') {
+            $value
+        }
+        else {
+            $escapedValue = [regex]::Replace($value, '(\\*)"', '$1$1\\"')
+            $escapedValue = [regex]::Replace($escapedValue, '(\\+)$', '$1$1')
+            '"' + $escapedValue + '"'
+        }
     }
+    $startInfo.Arguments = $quotedArguments -join ' '
 
     # Construct the process explicitly.  On some PowerShell/.NET hosts the
     # static Start overload can return $null even though the child was created,
