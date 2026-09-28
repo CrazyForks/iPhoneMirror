@@ -7079,12 +7079,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         if (_viewModel.ControlStatus.Current is { IsTerminal: false } current)
         {
             if (current.Mode == mode)
+            {
                 ReverseControlStatusWindow.Show(this, _viewModel.ControlStatus,
                     () => _ = _viewModel.CancelReverseControlAsync(mode),
                     countdownElapsed: mode == ControlStatusMode.Bluetooth
                         ? _viewModel.BeginBluetoothControlInputAfterStatusCountdown
                         : null);
-            return;
+                return;
+            }
+            ReverseControlStatusWindow.CloseActive();
         }
         _viewModel.ControlStatus.Begin(mode, _viewModel.SelectedDevice?.Name ?? "iPhone");
         ReverseControlStatusWindow.Show(this, _viewModel.ControlStatus,

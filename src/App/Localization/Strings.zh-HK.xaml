@@ -2,8 +2,6 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:system="clr-namespace:System;assembly=mscorlib">
     <FontFamily x:Key="NavigationTextFontFamily">Microsoft JhengHei UI</FontFamily>
-    <system:String x:Key="AccentFillBrush">#FF3B82F6</system:String>
-    <system:String x:Key="AccentTextBrush">#FFFFFFFF</system:String>
     <system:String x:Key="WindowTitle">iPhoneMirror — USB iPhone/iPad 螢幕鏡像</system:String>
     <system:String x:Key="AppSubtitle">Windows 有線 iPhone/iPad 螢幕擷取</system:String>
     <system:String x:Key="LanguageSystem">跟隨系統</system:String>
