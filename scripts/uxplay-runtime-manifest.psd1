@@ -22,6 +22,8 @@
         'lib\gstreamer-1.0\libgstautodetect.dll'
         'lib\gstreamer-1.0\libgstaudioconvert.dll'
         'lib\gstreamer-1.0\libgstaudioresample.dll'
+        'lib\gstreamer-1.0\libgstlevel.dll'
+        'lib\gstreamer-1.0\libgstvolume.dll'
         'lib\gstreamer-1.0\libgstvideoconvertscale.dll'
         'lib\gstreamer-1.0\libgsty4m.dll'
         'lib\gstreamer-1.0\libgstvideoparsersbad.dll'

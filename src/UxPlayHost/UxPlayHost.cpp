@@ -191,7 +191,7 @@ struct UxPlayRuntimeArtifact {
 };
 
 [[nodiscard]] constexpr auto uxplay_runtime_artifacts() noexcept {
-    return std::array<UxPlayRuntimeArtifact, 25>{
+    return std::array<UxPlayRuntimeArtifact, 27>{
         UxPlayRuntimeArtifact{L"uxplay.exe", true},
         UxPlayRuntimeArtifact{L"LICENSE", false},
         UxPlayRuntimeArtifact{L"SOURCE.md", false},
@@ -211,6 +211,8 @@ struct UxPlayRuntimeArtifact {
         UxPlayRuntimeArtifact{L"lib\\gstreamer-1.0\\libgstautodetect.dll", true},
         UxPlayRuntimeArtifact{L"lib\\gstreamer-1.0\\libgstaudioconvert.dll", true},
         UxPlayRuntimeArtifact{L"lib\\gstreamer-1.0\\libgstaudioresample.dll", true},
+        UxPlayRuntimeArtifact{L"lib\\gstreamer-1.0\\libgstlevel.dll", true},
+        UxPlayRuntimeArtifact{L"lib\\gstreamer-1.0\\libgstvolume.dll", true},
         UxPlayRuntimeArtifact{L"lib\\gstreamer-1.0\\libgstvideoconvertscale.dll", true},
         UxPlayRuntimeArtifact{L"lib\\gstreamer-1.0\\libgsty4m.dll", true},
         UxPlayRuntimeArtifact{L"lib\\gstreamer-1.0\\libgstvideoparsersbad.dll", true},

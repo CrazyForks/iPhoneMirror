@@ -320,7 +320,8 @@ Copy-Item -LiteralPath $resolvedDnsSdPath -Destination (
 $pluginNames = @(
     'libgstapp.dll', 'libgstcoreelements.dll',
     'libgstplayback.dll', 'libgstautodetect.dll',
-    'libgstaudioconvert.dll', 'libgstaudioresample.dll',
+    'libgstaudioconvert.dll', 'libgstaudioresample.dll', 'libgstlevel.dll',
+    'libgstvolume.dll',
     'libgstvideoconvertscale.dll', 'libgsty4m.dll', 'libgstvideoparsersbad.dll',
     'libgstlibav.dll')
 $pluginRoot = Join-Path $Msys 'ucrt64\lib\gstreamer-1.0'
@@ -344,7 +345,7 @@ Build environment: MSYS2 UCRT64
 GStreamer version: $GStreamerVersion
 Service discovery: UxPlay bundled mdnsd implementation
 GStreamer plugins: app, coreelements, playback, autodetect, audioconvert, audioresample,
-videoconvertscale, y4m, videoparsersbad, libav
+level, volume, videoconvertscale, y4m, videoparsersbad, libav
 Video recovery: h264parse inserts SPS/PPS at every IDR; avdec_h264 discards
 corrupted output and waits for the next synchronization point.
 "@ | Set-Content -LiteralPath (Join-Path $Destination 'SOURCE.md') -Encoding utf8

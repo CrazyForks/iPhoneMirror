@@ -3980,7 +3980,9 @@ Equal(true,
         StringComparer.OrdinalIgnoreCase) &&
     uxPlayRequiredRuntimeFiles.Contains("lib\\gstreamer-1.0\\libgstautodetect.dll",
         StringComparer.OrdinalIgnoreCase) &&
-    !uxPlayRequiredRuntimeFiles.Contains("lib\\gstreamer-1.0\\libgstlevel.dll",
+    uxPlayRequiredRuntimeFiles.Contains("lib\\gstreamer-1.0\\libgstlevel.dll",
+        StringComparer.OrdinalIgnoreCase) &&
+    uxPlayRequiredRuntimeFiles.Contains("lib\\gstreamer-1.0\\libgstvolume.dll",
         StringComparer.OrdinalIgnoreCase) &&
     uxPlayRequiredRuntimeFiles.Contains("lib\\gstreamer-1.0\\libgsty4m.dll",
         StringComparer.OrdinalIgnoreCase),

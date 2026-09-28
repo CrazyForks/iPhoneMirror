@@ -46,6 +46,10 @@ internal sealed class BluetoothHidMouseService : IAsyncDisposable
     // invisible controller queue from becoming visible pointer lag after
     // physical movement stops.
     private static readonly TimeSpan MouseReportInterval = TimeSpan.FromMilliseconds(8);
+    // A native WinRT notification can outlive its managed timeout. Shutdown
+    // must remain bounded so the UI can restore normal mouse input promptly.
+    private static readonly TimeSpan MousePumpStopTimeout =
+        TimeSpan.FromMilliseconds(250);
     // Report 1 is keyboard and report 2 is mouse. Keeping both reports in one
     // HID service lets iOS expose pointer and keyboard input from one pairing.
     private static readonly byte[] ReportMap =
@@ -311,7 +315,13 @@ internal sealed class BluetoothHidMouseService : IAsyncDisposable
             mousePump = _mousePumpTask;
         }
         if (mousePump is not null)
-            await mousePump.ConfigureAwait(false);
+        {
+            var completed = await Task.WhenAny(mousePump,
+                Task.Delay(MousePumpStopTimeout)).ConfigureAwait(false);
+            if (completed != mousePump)
+                DiagnosticLogger.ReverseControlWarning("bluetooth",
+                    "mouse_pump_stop_timeout");
+        }
         lock (_mousePumpSync)
         {
             _mousePumpStopping = false;
@@ -607,7 +617,13 @@ internal sealed class BluetoothHidMouseService : IAsyncDisposable
             mousePump = _mousePumpTask;
         }
         if (mousePump is not null)
-            await mousePump.ConfigureAwait(false);
+        {
+            var completed = await Task.WhenAny(mousePump,
+                Task.Delay(MousePumpStopTimeout)).ConfigureAwait(false);
+            if (completed != mousePump)
+                DiagnosticLogger.ReverseControlWarning("bluetooth",
+                    "mouse_pump_release_timeout");
+        }
         // Do not send the release report concurrently with a native report
         // whose managed timeout has already elapsed.
         try

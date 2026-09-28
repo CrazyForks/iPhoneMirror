@@ -1696,6 +1696,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             ("mouse", _rawMouseInputEnabled),
             ("win32_error", registered ? 0 : Marshal.GetLastWin32Error())));
         MainPreviewHost.SuppressMouseMove = _rawMouseInputEnabled;
+        MainPreviewHost.SuppressLegacyMouseButtons = _rawMouseInputEnabled;
         if (mouseEnabled || keyboardEnabled)
         {
             MainPreviewHost.Focus();
@@ -5799,6 +5800,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         // process-wide cursor, keyboard, raw-input, or clipping state by itself.
         _cursorClipWatchdogTimer.Change(Timeout.Infinite, Timeout.Infinite);
         MainPreviewHost.CapturePointerInput = false;
+        MainPreviewHost.ReleasePointerCapture();
+        MainPreviewHost.SuppressLegacyMouseButtons = false;
         SetWindowsCursorHidden(false);
         SetSystemKeySuppression(false);
         RegisterRawInput(false, false);
@@ -7106,6 +7109,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         }
         if (action == BluetoothShortcutAction.BluetoothControl)
         {
+            // Restore the native/WPF input route synchronously before the
+            // asynchronous HID teardown. A stalled WinRT notification must
+            // never leave the main window with a captured or suppressed mouse.
+            if (_viewModel.IsBluetoothControlEnabled)
+                ClearBluetoothControlInputState();
             ShowReverseControlStatus(ControlStatusMode.Bluetooth);
             _ = _viewModel.ToggleBluetoothControlAsync();
         }
