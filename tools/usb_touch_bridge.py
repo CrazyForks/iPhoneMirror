@@ -154,10 +154,11 @@ PASTEBOARD_OPERATION_TIMEOUT_SECONDS = 2.0
 # stall. Lifecycle and keyboard operations retain their longer timeout below.
 HID_OPERATION_TIMEOUT_SECONDS = 3.0
 HID_TOUCH_MOTION_TIMEOUT_SECONDS = 0.35
+HID_CLEANUP_TIMEOUT_SECONDS = 2.0
 # On devices that reject media-stream authentication (9021), iOS can revoke a
 # direct Universal HID session without warning even while the USB mirror is
-# healthy. Rotate this control-only process before the observed device lease
-# expires; the host rebuilds control without stopping the mirror session.
+# healthy. Keep the lease refresh timer advisory; rebuilding the process here
+# races the active QuickTime usbmux claim.
 DIRECT_HID_ROTATION_SECONDS = 12 * 60
 LOCKDOWN_RETRYABLE_ERRORS = (
     BadDevError,
@@ -1271,19 +1272,29 @@ class BridgeChannel:
             self._stdout.write(line.encode('utf-8'))
             self._stdout.flush()
 
-    async def read_messages(self):
+    async def _read_exactly(self, length: int) -> Optional[bytes]:
         loop = asyncio.get_event_loop()
+        chunks = bytearray()
+        while len(chunks) < length:
+            chunk = await loop.run_in_executor(
+                None, self._stdin.read, length - len(chunks))
+            if not chunk:
+                return None
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    async def read_messages(self):
         while True:
-            header = await loop.run_in_executor(None, self._stdin.read, 4)
-            if not header or len(header) < 4:
+            header = await self._read_exactly(4)
+            if header is None:
                 return
             (length,) = struct.unpack('<I', header)
             if length == 0 or length > MAX_FRAME_SIZE:
                 await self.emit({'event': 'error', 'code': 'bad_frame',
                                  'message': f'frame length must be between 1 and {MAX_FRAME_SIZE}'})
                 return
-            payload = await loop.run_in_executor(None, self._stdin.read, length)
-            if not payload or len(payload) < length:
+            payload = await self._read_exactly(length)
+            if payload is None:
                 return
             try:
                 yield json.loads(payload.decode('utf-8'))
@@ -2426,13 +2437,19 @@ class TouchSession:
                 await asyncio.gather(*paste_tasks, return_exceptions=True)
 
     async def _request_direct_hid_rotation(self) -> None:
-        """Ask the host to replace an unverified direct HID session before iOS drops it."""
+        """Report the lease refresh window without tearing down a live HID session.
+
+        Rebuilding the whole bridge here races the active QuickTime usbmux
+        claim and can make an otherwise healthy mirror lose control.  A real
+        HID operation failure still emits ``send_failed`` and follows the
+        normal recovery path; this timer must remain advisory only.
+        """
         try:
             await asyncio.sleep(DIRECT_HID_ROTATION_SECONDS)
             await self.ipc.emit({
-                'event': 'error',
-                'code': 'direct_hid_rotation',
-                'message': 'Rotating the direct Universal HID session before its device lease expires.',
+                'event': 'warning',
+                'code': 'direct_hid_rotation_deferred',
+                'message': 'Direct Universal HID lease refresh deferred while the active session is healthy.',
             })
         except asyncio.CancelledError:
             raise
@@ -2599,25 +2616,27 @@ class TouchSession:
                 await self._send_touch_report(report)
 
     async def _cleanup(self) -> None:
-        # 强制释放所有触点（异常清理）
-        if self.hid is not None:
-            try:
-                if self.keyboard_service_id is not None:
+        # 强制释放所有触点（异常清理）。失效 HID 可能不响应；不要让
+        # 逐个释放报告阻塞 usbmux 接口的释放，否则下一次控制重连会在
+        # 旧桥仍持有接口时开始 VERSION 握手。
+        async def release_hid_state() -> None:
+            if self.hid is None:
+                return
+            if self.keyboard_service_id is not None:
+                with contextlib.suppress(Exception):
                     await self.hid.send_keyboard(self.keyboard_service_id, [])
-            except Exception:
-                pass
-        if self.hid is not None:
-            try:
-                for slot in range(MAX_SLOTS):
-                    report = build_touchscreen_report(slot, TOUCHSCREEN_STATE_RELEASE, 0, 0)
-                    await self.hid.send_report(DIGITIZER_SURFACE_MAIN_TOUCHSCREEN, report)
-            except Exception:
-                pass
-            if self._owns_hid:
-                try:
-                    await self.hid.__aexit__(None, None, None)
-                except Exception:
-                    pass
+            for slot in range(MAX_SLOTS):
+                report = build_touchscreen_report(slot, TOUCHSCREEN_STATE_RELEASE, 0, 0)
+                with contextlib.suppress(Exception):
+                    await self.hid.send_report(
+                        DIGITIZER_SURFACE_MAIN_TOUCHSCREEN, report)
+
+        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(
+                release_hid_state(), timeout=HID_CLEANUP_TIMEOUT_SECONDS)
+        if self.hid is not None and self._owns_hid:
+            with contextlib.suppress(Exception):
+                await self.hid.__aexit__(None, None, None)
         if self.indigo is not None:
             try:
                 await self.indigo.__aexit__(None, None, None)

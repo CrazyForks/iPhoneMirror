@@ -54,6 +54,8 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private readonly SemaphoreSlim _screenshotGate = new(1, 1);
     private readonly MediaCastEventGate _mediaCastEvents = new();
     private bool _isFullScreen;
+    private bool _localFullScreenEscapeDown;
+    private bool _localFullScreenF11Down;
     private bool _isWindowMaximized;
     private bool _handlingNativeMaximize;
     private bool _restoreWasWindowMaximized;
@@ -1858,14 +1860,40 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         var virtualKey = keyboard.VirtualKey;
         if (virtualKey is 0x5B or 0x5C or 0x5D or 0x5F)
             return;
+        if (!isKeyUp && virtualKey == 0x1B && _localFullScreenEscapeDown)
+            return;
+        if (isKeyUp && virtualKey == 0x1B && _localFullScreenEscapeDown)
+        {
+            _localFullScreenEscapeDown = false;
+            return;
+        }
+        if (virtualKey == 0x7A && _localFullScreenF11Down)
+        {
+            if (isKeyUp) _localFullScreenF11Down = false;
+            return;
+        }
         if (TryGetShortcutAction(virtualKey, out var shortcutAction))
         {
             if (!isKeyUp && !_registeredHotKeyIds.Contains(HotKeyId(shortcutAction)))
                 HandleConfiguredShortcut(shortcutAction);
             return;
         }
+        if (virtualKey == 0x7A)
+        {
+            if (!isKeyUp && !_localFullScreenF11Down)
+            {
+                _localFullScreenF11Down = true;
+                _ = ToggleActiveFullScreenAsync();
+            }
+            else if (isKeyUp)
+            {
+                _localFullScreenF11Down = false;
+            }
+            return;
+        }
         if (!isKeyUp && virtualKey == 0x1B && _isFullScreen)
         {
+            _localFullScreenEscapeDown = true;
             ToggleFullScreen();
             return;
         }
@@ -5841,6 +5869,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             PreviewPanel.ClearValue(HorizontalAlignmentProperty);
             PreviewPanel.SetResourceReference(Panel.BackgroundProperty,
                 "PreviewChromeBrush");
+            PreviewPanel.BorderThickness = new Thickness(1);
+            PreviewPanel.CornerRadius = new CornerRadius(16);
+            PreviewPanel.SetResourceReference(Border.BorderBrushProperty, "BorderBrush");
+            MainPreviewHost.SetDeviceCornerProfile(DeviceCornerProfile.Rectangular,
+                enabled: false);
             MinWidth = 1280;
             if (_lightweightModeApplied && !_isWindowMaximized)
             {
@@ -5864,10 +5897,24 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         PreviewPanel.MinWidth = 0;
         PreviewPanel.ClearValue(WidthProperty);
         if (HasLightweightVideoPresentation)
-            PreviewPanel.Background = Brushes.Black;
+        {
+            // Compact mode lets the native preview own the device outline;
+            // the WPF frame must not leave a black strip above the clipped
+            // child HWND.
+            PreviewPanel.Background = Brushes.Transparent;
+            PreviewPanel.BorderThickness = new Thickness(0);
+            PreviewPanel.CornerRadius = new CornerRadius(0);
+            PreviewPanel.BorderBrush = Brushes.Transparent;
+        }
         else
+        {
             PreviewPanel.SetResourceReference(Panel.BackgroundProperty,
                 "PreviewChromeBrush");
+            PreviewPanel.BorderThickness = new Thickness(1);
+            PreviewPanel.CornerRadius = new CornerRadius(16);
+            PreviewPanel.SetResourceReference(Border.BorderBrushProperty, "BorderBrush");
+        }
+        UpdateMainPreviewCornerProfile();
         ApplyLightweightPreviewFramePolicy();
         if (_isWindowMaximized)
             return;
@@ -6000,6 +6047,17 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         PreviewPanel.MinWidth = LightweightNormalPortraitPreviewWidth;
         PreviewPanel.MaxWidth = LightweightNormalPortraitPreviewWidth;
         PreviewPanel.HorizontalAlignment = HorizontalAlignment.Center;
+    }
+
+    private void OnPreviewPanelSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        // Width is derived from the actual preview height in compact mode.
+        // A title-bar/DPI/workspace transition can change that height after
+        // the initial source-size notification; refit once so the native
+        // surface remains source-aspect and cannot retain top/bottom bars.
+        if (e.HeightChanged && _viewModel.IsLightweightApplicationMode &&
+            HasLightweightVideoPresentation && HasLightweightContentDimensions)
+            RequestLightweightWindowFit();
     }
 
     private bool TryGetLightweightContentPreviewWidth(double maximumWidth,
@@ -6305,6 +6363,23 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private bool HasLightweightVideoPresentation => _viewModel.IsCapturing ||
         (_mediaCastActive && _viewModel.IsMediaCastSelected);
 
+    private void UpdateMainPreviewCornerProfile()
+    {
+        var useDeviceOutline = _viewModel.IsLightweightApplicationMode &&
+            !_isFullScreen && HasLightweightVideoPresentation &&
+            !_viewModel.IsMediaCastSelected;
+        var profile = useDeviceOutline
+            ? DeviceCornerProfileResolver.Resolve(_viewModel.SelectedDevice?.ProductType,
+                _viewModel.SourceVideoWidth, _viewModel.SourceVideoHeight)
+            : DeviceCornerProfile.Rectangular;
+        MainPreviewHost.SetDeviceCornerProfile(profile, useDeviceOutline);
+
+        var session = _viewModel.CurrentSessionHandle;
+        if (session != 0)
+            _ = NativeCore.SetDeviceCornerProfile(session,
+                profile.IsRounded ? profile.RadiusRatio : 0, profile.CurveExponent);
+    }
+
     private bool HasLightweightContentDimensions =>
         _viewModel.SourceVideoWidth != 0 && _viewModel.SourceVideoHeight != 0;
 
@@ -6464,6 +6539,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void SynchronizeMainPreviewHost()
     {
+        UpdateMainPreviewCornerProfile();
         var mediaOnMain = _mediaCastActive && _mediaCastPreviewWindow is null &&
             _viewModel.IsMediaCastSelected;
         var independentOnMain = !mediaOnMain && !_viewModel.IsMediaCastSelected &&
@@ -6621,6 +6697,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         }
         if (!_viewModel.IsMediaCastSelected) MainPreviewHost.Activate();
         MainPreviewHost.IsFullScreenPresentation = _isFullScreen;
+        UpdateMainPreviewCornerProfile();
         ApplyApplicationDisplayMode();
         UpdateMediaCastFullScreenButton();
         _viewModel.AddDiagnosticLog(AppLog.Event("main_fullscreen_state",
@@ -6937,6 +7014,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         if (key == Key.Escape &&
             Keyboard.Modifiers == ModifierKeys.None && _isFullScreen)
         {
+            _localFullScreenEscapeDown = true;
             ToggleFullScreen();
             e.Handled = true;
             return;
@@ -6946,6 +7024,16 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         {
             if (!_registeredHotKeyIds.Contains(HotKeyId(configuredAction)))
                 HandleConfiguredShortcut(configuredAction);
+            e.Handled = true;
+            return;
+        }
+        if (key == Key.F11)
+        {
+            if (!_localFullScreenF11Down)
+            {
+                _localFullScreenF11Down = true;
+                _ = ToggleActiveFullScreenAsync();
+            }
             e.Handled = true;
             return;
         }
@@ -6999,6 +7087,18 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private void OnPreviewKeyUp(object sender, KeyEventArgs e)
     {
         var key = ResolvePreviewKey(e);
+        if (key == Key.F11)
+        {
+            _localFullScreenF11Down = false;
+            e.Handled = true;
+            return;
+        }
+        if (key == Key.Escape && _localFullScreenEscapeDown)
+        {
+            _localFullScreenEscapeDown = false;
+            e.Handled = true;
+            return;
+        }
         if (TryGetShortcutAction(KeyInterop.VirtualKeyFromKey(key), out _))
         {
             e.Handled = true;

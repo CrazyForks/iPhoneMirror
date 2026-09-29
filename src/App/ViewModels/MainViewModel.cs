@@ -1692,6 +1692,11 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(CanStartBluetoothControl));
             OnPropertyChanged(nameof(CanStopBluetoothControl));
             OnPropertyChanged(nameof(CanToggleBluetoothControl));
+            OnPropertyChanged(nameof(CanToggleUsbControl));
+            OnPropertyChanged(nameof(CanStartUsbControl));
+            OnPropertyChanged(nameof(CanStartWirelessControl));
+            OnPropertyChanged(nameof(CanToggleWiredControl));
+            OnPropertyChanged(nameof(CanToggleWirelessControl));
             StartBluetoothControlCommand.NotifyCanExecuteChanged();
             StopBluetoothControlCommand.NotifyCanExecuteChanged();
             ToggleBluetoothControlCommand.NotifyCanExecuteChanged();
@@ -2017,7 +2022,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             ControlStatus.ResolvePrompt(new(ControlPromptAction.Cancel));
             if (!string.IsNullOrWhiteSpace(controlDeviceUdid))
                 _bluetoothBindingPromptedTargets.Remove(controlDeviceUdid);
-            try { await _bluetoothControl.ReleaseAllAsync(); }
+            try { await _bluetoothControl.ReleaseAllAsync(keepPumpStopped: true); }
             catch (Exception error)
             {
                 AddDiagnosticLog(AppLog.Event("bluetooth_control_release_failed",
@@ -2043,9 +2048,15 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(CanStartBluetoothControl));
             OnPropertyChanged(nameof(CanStopBluetoothControl));
             OnPropertyChanged(nameof(CanToggleBluetoothControl));
+            OnPropertyChanged(nameof(CanToggleUsbControl));
+            OnPropertyChanged(nameof(CanStartUsbControl));
+            OnPropertyChanged(nameof(CanStartWirelessControl));
+            OnPropertyChanged(nameof(CanToggleWiredControl));
+            OnPropertyChanged(nameof(CanToggleWirelessControl));
             StartBluetoothControlCommand.NotifyCanExecuteChanged();
             StopBluetoothControlCommand.NotifyCanExecuteChanged();
             ToggleBluetoothControlCommand.NotifyCanExecuteChanged();
+            ToggleUsbControlCommand?.NotifyCanExecuteChanged();
         }
     }
 
@@ -3090,10 +3101,16 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CanStartBluetoothControl));
         OnPropertyChanged(nameof(CanStopBluetoothControl));
         OnPropertyChanged(nameof(CanToggleBluetoothControl));
+        OnPropertyChanged(nameof(CanToggleUsbControl));
+        OnPropertyChanged(nameof(CanStartUsbControl));
+        OnPropertyChanged(nameof(CanStartWirelessControl));
+        OnPropertyChanged(nameof(CanToggleWiredControl));
+        OnPropertyChanged(nameof(CanToggleWirelessControl));
         OnPropertyChanged(nameof(BluetoothControlActionText));
         StartBluetoothControlCommand.NotifyCanExecuteChanged();
         StopBluetoothControlCommand.NotifyCanExecuteChanged();
         ToggleBluetoothControlCommand.NotifyCanExecuteChanged();
+        ToggleUsbControlCommand?.NotifyCanExecuteChanged();
     }
 
     private async Task ShowBluetoothWaitingPromptAsync()

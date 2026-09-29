@@ -1277,7 +1277,8 @@
                 <Border x:Name="PreviewPanel" Grid.Row="1" Background="{DynamicResource PreviewChromeBrush}" BorderBrush="{DynamicResource BorderBrush}"
                         BorderThickness="1" CornerRadius="16" ClipToBounds="True"
                         HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
-                        MinWidth="0" MinHeight="0" SnapsToDevicePixels="True">
+                        MinWidth="0" MinHeight="0" SnapsToDevicePixels="True"
+                        SizeChanged="OnPreviewPanelSizeChanged">
                     <Grid>
                         <Grid>
                             <Grid.Style>

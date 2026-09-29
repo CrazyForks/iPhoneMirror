@@ -4,6 +4,8 @@ FiveSlotStateMachine 和 HID 报告构建器的单元测试。
 不需要真机连接——纯逻辑测试。
 """
 
+import asyncio
+import json
 import struct
 import time
 import hashlib
@@ -24,6 +26,71 @@ class TestPackagedSourceParity(unittest.TestCase):
         build = (root / 'build.ps1').read_text(encoding='utf-8')
         self.assertIn("-SourceRoot (Join-Path $Root 'tools')", build)
         self.assertIn("& (Join-Path $stage 'build.ps1') -BridgeOnly", build)
+
+
+class TestBridgeChannel(unittest.TestCase):
+    def test_read_messages_reassembles_short_pipe_reads(self):
+        from usb_touch_bridge import BridgeChannel
+
+        message = {"type": "touch", "x": 12, "y": 34}
+        payload = json.dumps(message).encode("utf-8")
+        frame = struct.pack("<I", len(payload)) + payload
+
+        class ChunkedReader:
+            def __init__(self, data):
+                self.data = data
+
+            def read(self, length):
+                if not self.data:
+                    return b""
+                count = min(2, length, len(self.data))
+                chunk, self.data = self.data[:count], self.data[count:]
+                return chunk
+
+        channel = BridgeChannel()
+        channel._stdin = ChunkedReader(frame)
+        messages = asyncio.run(self._read_one(channel))
+        self.assertEqual([message], messages)
+
+    @staticmethod
+    async def _read_one(channel):
+        messages = []
+        async for message in channel.read_messages():
+            messages.append(message)
+            break
+        return messages
+
+
+class TestDirectHidLeaseRefresh(unittest.TestCase):
+    def test_lease_refresh_is_advisory(self):
+        from usb_touch_bridge import TouchSession
+
+        class Ipc:
+            def __init__(self):
+                self.events = []
+
+            async def emit(self, event):
+                self.events.append(event)
+
+        async def run():
+            ipc = Ipc()
+            session = TouchSession.__new__(TouchSession)
+            session.ipc = ipc
+            async def immediate_sleep(_):
+                return None
+            with patch("usb_touch_bridge.asyncio.sleep", new=immediate_sleep):
+                await session._request_direct_hid_rotation()
+            return ipc.events
+
+        events = asyncio.run(run())
+        self.assertEqual(
+            [{
+                "event": "warning",
+                "code": "direct_hid_rotation_deferred",
+                "message": "Direct Universal HID lease refresh deferred while the active session is healthy.",
+            }],
+            events,
+        )
 
 
 class TestFiveSlotStateMachine(unittest.TestCase):

@@ -39,12 +39,24 @@ private:
         static_cast<std::uint8_t>(DnsSdCompletionOwner::Pending)};
 };
 
+// Windows DNS-SD uses InterfaceIndex=0 to publish on every eligible
+// interface. Keep that value distinct from the internal "not selected yet"
+// value used by the registration retry state machine.
+inline constexpr std::uint32_t DnsSdAllInterfaces = 0xFFFFFFFFu;
+
 constexpr std::uint32_t dns_sd_registration_interface(
     std::uint32_t requested, std::uint32_t preferred) noexcept {
-    // A concrete adapter is always preferable to DNS-SD's special zero value
-    // (which means "all interfaces"). Keep the caller's index only when the
-    // adapter probe could not find a better connected interface.
+    // When the upstream caller did not constrain discovery to a specific
+    // adapter, retain Windows DNS-SD's all-interface behavior. Selecting just
+    // the lowest-metric adapter hides an AirPlay receiver from Mobile Hotspot
+    // clients when Ethernet remains the preferred route.
+    if (requested == 0 && preferred != 0) return DnsSdAllInterfaces;
     return preferred != 0 ? preferred : requested;
+}
+
+constexpr std::uint32_t dns_sd_native_interface(
+    std::uint32_t interface_index) noexcept {
+    return interface_index == DnsSdAllInterfaces ? 0 : interface_index;
 }
 
 struct DnsSdLeaseAcquire {

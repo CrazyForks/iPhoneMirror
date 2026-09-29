@@ -211,6 +211,17 @@ foreach (var localizationPath in Directory.GetFiles(
         usbRecovery.Contains("数据线", StringComparison.Ordinal) ||
         usbRecovery.Contains("傳輸線", StringComparison.Ordinal),
         $"USB recovery asks the user to replace/reconnect a cable in {Path.GetFileName(localizationPath)}");
+    foreach (var numberedReminder in localization.Descendants()
+                 .Select(element => (Key: (string?)element.Attribute(xaml + "Key"),
+                     Body: element.Value))
+                 .Where(entry => entry.Body.Contains("1.", StringComparison.Ordinal) &&
+                                 entry.Body.Contains("2.", StringComparison.Ordinal)))
+    {
+        var secondStep = numberedReminder.Body.IndexOf("2.", StringComparison.Ordinal);
+        Equal(true, secondStep > 0 && numberedReminder.Body[..secondStep]
+                .Contains("\n", StringComparison.Ordinal),
+            $"numbered reminder {numberedReminder.Key} uses separate lines in {Path.GetFileName(localizationPath)}");
+    }
 }
 
 Equal(LocalizationService.TraditionalChineseHongKong,
@@ -434,6 +445,9 @@ var previewKeyHandlerIndex = mainWindowSource.IndexOf(
 var mainEscapeGuardIndex = mainWindowSource.IndexOf(
     "if (key == Key.Escape &&", previewKeyHandlerIndex,
     StringComparison.Ordinal);
+var mainF11GuardIndex = mainWindowSource.IndexOf(
+    "if (key == Key.F11)", previewKeyHandlerIndex,
+    StringComparison.Ordinal);
 var previewKeyboardRouteIndex = mainWindowSource.IndexOf(
     "if (TryRoutePreviewKeyboardEvent", previewKeyHandlerIndex,
     StringComparison.Ordinal);
@@ -445,16 +459,24 @@ var nativeKeyboardRouteIndex = previewWindowSource.IndexOf(
     StringComparison.Ordinal);
 Equal(true,
     previewKeyHandlerIndex >= 0 && mainEscapeGuardIndex > previewKeyHandlerIndex &&
+    mainF11GuardIndex > mainEscapeGuardIndex &&
     previewKeyboardRouteIndex > mainEscapeGuardIndex &&
+    previewKeyboardRouteIndex > mainF11GuardIndex &&
     nativeEscapeHandlerIndex >= 0 && nativeKeyboardRouteIndex > nativeEscapeHandlerIndex,
-    "Escape exits full screen before reverse-control keyboard routing");
+    "Escape and F11 stay local before reverse-control keyboard routing");
 Equal(true,
     mainWindowSource.Contains(
         "e.VirtualKey == 0x1B && _isFullScreen", StringComparison.Ordinal) &&
     mainWindowSource.Contains(
         "!isKeyUp && virtualKey == 0x1B && _isFullScreen",
-        StringComparison.Ordinal),
-    "captured and raw preview Escape events also exit full screen");
+        StringComparison.Ordinal) &&
+    mainWindowSource.Contains(
+        "virtualKey == 0x7A", StringComparison.Ordinal) &&
+    mainWindowSource.Contains(
+        "_localFullScreenF11Down = false", StringComparison.Ordinal) &&
+    mainWindowSource.Contains(
+        "_localFullScreenEscapeDown = false", StringComparison.Ordinal),
+    "captured and raw preview Escape/F11 events also exit full screen");
 Equal(true, WindowsAutoPlayGuard.ShouldCancel(
         WindowsAutoPlayGuard.QueryCancelAutoPlayMessage, captureActive: true),
     "active capture cancels Windows AutoPlay device claims");
@@ -1335,9 +1357,12 @@ Equal(true,
         StringComparison.Ordinal) &&
     bluetoothHidCode.Contains("RetireNotificationChannel(channel);",
         StringComparison.Ordinal) &&
-    bluetoothHidCode.Contains("TimeSpan.FromMilliseconds(300)",
-        StringComparison.Ordinal),
-    "transient mouse notification stalls drop the latest packet without disconnecting Bluetooth control");
+    bluetoothHidCode.Contains("Task.WhenAny(notifyTask, Task.Delay(timeout))",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("ReleaseMouseNotificationGateAsync(notifyTask)",
+        StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("ScheduleMouseStallRecovery();", StringComparison.Ordinal),
+    "a timed-out mouse notification tears down the route while retaining its transport slot until the native call ends");
 Equal(true,
     mainWindowCode.Contains("ProcessLatestQueuedRawMouseInput", StringComparison.Ordinal) &&
     mainWindowCode.Contains("PeekMessageW", StringComparison.Ordinal) &&
@@ -1409,6 +1434,19 @@ Equal(true,
     bluetoothHidCode.Contains("var modifierReleased = SendConsumerAsync(0",
         StringComparison.Ordinal),
     "Bluetooth GATT callbacks leave the WinRT callback thread before client refresh and system shortcuts always attempt key releases");
+Equal(true,
+    bluetoothHidCode.Contains("_mousePumpGeneration", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("Interlocked.Increment(ref _mousePumpGeneration)", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("StartMousePumpIfNeeded(generation)", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("TargetClientGateTimeout", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("ReleaseReportsTimeout", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("bluetooth_stop_gate_timeout", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("release_reports_timeout", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("ReleaseAllAsync(bool keepPumpStopped = false)", StringComparison.Ordinal) &&
+    mainViewModelCode.Contains("ReleaseAllAsync(keepPumpStopped: true)", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("ScheduleMouseStallRecovery", StringComparison.Ordinal) &&
+    bluetoothHidCode.Contains("mouse_stall_recovery_begin", StringComparison.Ordinal),
+    "Bluetooth stop invalidates delayed mouse retries, aborts a stalled mouse route, and bounds release cleanup before restoring the main window");
 Equal(true,
     mainWindowCode.Contains("await _viewModel.SendBluetoothAppSwitcherAsync(target)",
         StringComparison.Ordinal) &&
@@ -1957,6 +1995,24 @@ Equal(true,
         StringComparison.Ordinal) &&
     mainViewModelSource.Contains("private void NotifyCaptureSessionChanged()", StringComparison.Ordinal),
     "Bluetooth action availability refreshes for busy, media-source, and capture-session changes");
+var bluetoothStateNotifyStart = mainViewModelSource.IndexOf(
+    "private void NotifyBluetoothControlStateChanged()", StringComparison.Ordinal);
+var bluetoothStateNotifyEnd = bluetoothStateNotifyStart >= 0
+    ? mainViewModelSource.IndexOf("private async Task ShowBluetoothWaitingPromptAsync()",
+        bluetoothStateNotifyStart, StringComparison.Ordinal)
+    : -1;
+var bluetoothStateNotifyCode = bluetoothStateNotifyStart >= 0 &&
+    bluetoothStateNotifyEnd > bluetoothStateNotifyStart
+        ? mainViewModelSource[bluetoothStateNotifyStart..bluetoothStateNotifyEnd]
+        : string.Empty;
+Equal(true,
+    bluetoothStateNotifyCode.Contains("nameof(CanStartUsbControl)", StringComparison.Ordinal) &&
+    bluetoothStateNotifyCode.Contains("nameof(CanStartWirelessControl)", StringComparison.Ordinal) &&
+    bluetoothStateNotifyCode.Contains("nameof(CanToggleWiredControl)", StringComparison.Ordinal) &&
+    bluetoothStateNotifyCode.Contains("nameof(CanToggleWirelessControl)", StringComparison.Ordinal) &&
+    bluetoothStateNotifyCode.Contains("ToggleUsbControlCommand?.NotifyCanExecuteChanged()",
+        StringComparison.Ordinal),
+    "Bluetooth start and stop refresh the wired and wireless control availability");
 Equal(true,
     previewRendererCode.Contains("horizontal_gap >= 0.0F && horizontal_gap < 1.0F",
         StringComparison.Ordinal) &&
@@ -4143,8 +4199,8 @@ Equal(true,
         StringComparer.Ordinal) &&
     !hlsBridgeArguments.Contains("-reconnect_at_eof", StringComparer.Ordinal) &&
     hlsBridgeArguments.Contains("mpegts", StringComparer.Ordinal) &&
-    hlsBridgeArguments[^1] == "http://127.0.0.1:18081/stream.ts",
-    "HLS playback uses FFmpeg playlist recovery and a continuous MPEG-TS bridge");
+    hlsBridgeArguments[^1] == "pipe:1",
+    "HLS playback uses FFmpeg playlist recovery and an in-process MPEG-TS bridge");
 var hlsSeekArguments = HlsMediaPlaybackBridge.BuildArguments(
     new Uri("https://example.test/episode.m3u8"),
     new Uri("http://127.0.0.1:18081/stream.ts"), 123.5);

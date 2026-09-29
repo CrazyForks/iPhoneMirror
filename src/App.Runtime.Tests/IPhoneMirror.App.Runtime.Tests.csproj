@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <IsTestProject>true</IsTestProject>
+    <GenerateProgramFile>false</GenerateProgramFile>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
@@ -15,4 +17,13 @@
     <Content Include="..\App\Assets\iPhoneMirror.ico" Link="Assets\iPhoneMirror.ico"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="MSTest.TestAdapter" Version="3.8.2" />
+    <PackageReference Include="MSTest.TestFramework" Version="3.8.2" />
+  </ItemGroup>
+
+  <Target Name="RunSmokeTests" BeforeTargets="VSTest" DependsOnTargets="Build">
+    <Exec Command="dotnet run --no-restore --no-build --project &quot;$(MSBuildProjectFullPath)&quot; --configuration $(Configuration)" />
+  </Target>
 </Project>

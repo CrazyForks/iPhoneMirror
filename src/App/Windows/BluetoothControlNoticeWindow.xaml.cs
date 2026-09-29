@@ -9,7 +9,7 @@ using IPhoneMirror.App.Updater;
 namespace IPhoneMirror.App.Windows;
 
 public sealed partial class BluetoothControlNoticeWindow :
-    Wpf.Ui.Controls.FluentWindow, INotifyPropertyChanged
+    Window, INotifyPropertyChanged
 {
     private enum NoticeState { Waiting, Connected, Failed, ReportMapChanged, Prerequisite }
 

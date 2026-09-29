@@ -978,11 +978,15 @@ struct D3D11PreviewRenderer::Impl {
     }
 
     bool rounded_window_enabled() const noexcept {
-        // The native preview enters full screen by removing WS_THICKFRAME
-        // instead of maximizing the HWND, so IsZoomed alone is insufficient.
-        // Normal composition windows retain the frame solely for hit-tested
-        // resizing; full-screen and maximized surfaces must remain rectangular.
-        return composition_mode && !IsZoomed(window) &&
+        // The main compact preview is a child HWND and therefore cannot use a
+        // transparent DComp swap chain. It still needs the shader's
+        // anti-aliased device curve; the matching HWND region removes only
+        // the fully transparent outer pixels. Full-screen and maximized
+        // surfaces intentionally remain rectangular.
+        const auto packed_profile = corner_profile.load(std::memory_order_relaxed);
+        const auto normalized_radius = std::bit_cast<float>(
+            static_cast<std::uint32_t>(packed_profile >> 32U));
+        return normalized_radius > 0.0F && !IsZoomed(window) &&
             GetPropW(window, L"iPhoneMirrorFullScreen") == nullptr;
     }
 

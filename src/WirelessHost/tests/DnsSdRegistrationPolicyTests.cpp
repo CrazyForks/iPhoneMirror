@@ -26,7 +26,8 @@ bool has_property(const iPhoneMirror::wireless::DnsSdProperties& properties,
 
 int main() {
     constexpr std::array cases{
-        std::array{std::uint32_t{0}, std::uint32_t{7}, std::uint32_t{7}},
+        std::array{std::uint32_t{0}, std::uint32_t{7},
+            iPhoneMirror::wireless::DnsSdAllInterfaces},
         std::array{std::uint32_t{0}, std::uint32_t{0}, std::uint32_t{0}},
         std::array{std::uint32_t{3}, std::uint32_t{0}, std::uint32_t{3}},
         std::array{std::uint32_t{21}, std::uint32_t{42}, std::uint32_t{42}},
@@ -40,6 +41,13 @@ int main() {
             std::cerr << "DNS-SD interface selection ignored the preferred adapter\n";
             return 1;
         }
+    }
+
+    if (iPhoneMirror::wireless::dns_sd_native_interface(
+            iPhoneMirror::wireless::DnsSdAllInterfaces) != 0 ||
+        iPhoneMirror::wireless::dns_sd_native_interface(17) != 17) {
+        std::cerr << "all-interface DNS-SD sentinel was not mapped correctly\n";
+        return 1;
     }
 
     iPhoneMirror::wireless::DnsSdRegistrationLeases leases;

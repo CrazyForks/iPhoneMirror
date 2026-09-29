@@ -119,6 +119,10 @@ struct DnsOperationContext {
     DnsOperationKind kind{};
     DNS_SERVICE_REGISTER_REQUEST request{};
     DNS_SERVICE_CANCEL cancel{};
+    // Internal interface identity. DnsServiceRegister receives 0 for the
+    // all-interfaces sentinel, so the native request alone cannot preserve
+    // the distinction needed by the lease state machine.
+    std::uint32_t logical_interface{};
 
     DnsOperationContext(std::shared_ptr<LogicalRegistration> registration,
         DnsOperationKind operation) noexcept
@@ -399,9 +403,7 @@ std::optional<std::uint32_t> preferred_dns_sd_interface_impl(
             requested, best->index);
     }
     if (requested != 0) return requested;
-    // Never intentionally pass DNS-SD's zero/all-interfaces sentinel when no
-    // connected adapter can be selected. The caller keeps an opaque logical
-    // registration and can retry when the upstream enumerates an adapter.
+    // Keep the opaque logical registration pending until an adapter appears.
     return std::nullopt;
 }
 
@@ -680,7 +682,8 @@ void try_begin_register(const std::shared_ptr<LogicalRegistration>& logical,
             return;
         }
         logical->request.Version = 1;
-        logical->request.InterfaceIndex = interface_index;
+        logical->request.InterfaceIndex =
+            iPhoneMirror::wireless::dns_sd_native_interface(interface_index);
         logical->request.pServiceInstance = logical->instance;
         logical->request.pRegisterCompletionCallback = dns_operation_complete;
         logical->request.pQueryContext = operation;
@@ -688,6 +691,7 @@ void try_begin_register(const std::shared_ptr<LogicalRegistration>& logical,
         logical->state = NativeRegistrationState::Registering;
         logical->registering_operation = operation;
         operation->request = logical->request;
+        operation->logical_interface = interface_index;
     }
 
     pin_dns_sd_module();
@@ -786,7 +790,7 @@ void WINAPI dns_operation_complete(DWORD status, void* context,
                     if (status == ERROR_SUCCESS) {
                         logical->state = NativeRegistrationState::Registered;
                         logical->active_interface =
-                            operation->request.InterfaceIndex;
+                            operation->logical_interface;
                     }
                     else if (logical->leases.size() == 0) {
                         close_logical_registration_locked(logical);
@@ -1018,7 +1022,9 @@ static DNSServiceErrorType dns_service_register_impl(
     logical->regtype = regtype;
     logical->service_identity = service_name;
     logical->requested_interface = interface_index;
-    logical->request.InterfaceIndex = registration->interface_index;
+    logical->request.InterfaceIndex =
+        iPhoneMirror::wireless::dns_sd_native_interface(
+            registration->interface_index);
     logical->instance = DnsServiceConstructInstance(service_name.c_str(),
         host.c_str(), nullptr, nullptr, ntohs(network_port), 0, 0,
         static_cast<DWORD>(properties.size()), keys.data(), values.data());

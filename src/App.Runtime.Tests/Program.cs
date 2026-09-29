@@ -1374,6 +1374,14 @@ internal static class Program
         if (!notice.IsVisible || !notice.Topmost || notice.Owner != owner)
             throw new InvalidOperationException(
                 "Bluetooth control waiting notice must be visible, topmost, and owned.");
+        var noticeSurface = notice.FindName("WindowSurface") as WpfBorder ??
+            throw new InvalidOperationException(
+                "Bluetooth control notice surface was not found.");
+        if (!notice.AllowsTransparency ||
+            noticeSurface.CornerRadius != new CornerRadius(20) ||
+            noticeSurface.BorderThickness != new Thickness(1))
+            throw new InvalidOperationException(
+                "Bluetooth control notice must use only its self-drawn outer corners.");
         var waitingDetail = noticeType.GetProperty("DetailText")?.GetValue(notice) as string;
         if (string.IsNullOrWhiteSpace(waitingDetail) ||
             !waitingDetail.Contains("TEST-PC", StringComparison.Ordinal))

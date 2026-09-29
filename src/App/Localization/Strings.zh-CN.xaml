@@ -287,19 +287,9 @@
     <system:String x:Key="ReverseControlErrorBodyFormat">{0}反向控制发生错误：{1}</system:String>
     <system:String x:Key="ReverseControlPrerequisiteStatus">请确认准备工作后继续</system:String>
     <system:String x:Key="ReverseControlPrerequisiteWiredTitle">启用有线控制前请确认</system:String>
-    <system:String x:Key="ReverseControlPrerequisiteWiredBody">1. 开启“开发者模式”并重启设备。
-2. USB 连接设备，解锁并点击“信任此电脑”。
-3. 首次使用会从 GitHub 下载匹配的 DDI。
-4. 准备完成前不会发送输入。
-
-完成后点击“继续”，否则点击“取消”。</system:String>
+    <system:String x:Key="ReverseControlPrerequisiteWiredBody">1. 开启“开发者模式”并重启设备。&#x0A;2. USB 连接设备，解锁并点击“信任此电脑”。&#x0A;3. 首次使用会从 GitHub 下载匹配的 DDI。&#x0A;4. 准备完成前不会发送输入。&#x0A;&#x0A;完成后点击“继续”，否则点击“取消”。</system:String>
     <system:String x:Key="ReverseControlPrerequisiteWirelessTitle">启用无线控制前请确认</system:String>
-    <system:String x:Key="ReverseControlPrerequisiteWirelessBody">1. 开启“开发者模式”并重启设备。
-2. 先通过 USB 完成信任和无线配对。
-3. 保持设备解锁，并连接同一局域网。
-4. 允许 iPhoneMirror 通过 Windows 防火墙通信。
-
-完成后点击“继续”，否则点击“取消”。</system:String>
+    <system:String x:Key="ReverseControlPrerequisiteWirelessBody">1. 开启“开发者模式”并重启设备。&#x0A;2. 先通过 USB 完成信任和无线配对。&#x0A;3. 保持设备解锁，并连接同一局域网。&#x0A;4. 允许 iPhoneMirror 通过 Windows 防火墙通信。&#x0A;&#x0A;完成后点击“继续”，否则点击“取消”。</system:String>
     <system:String x:Key="BluetoothControlReportMapChangedTitle">蓝牙控制需要刷新配对</system:String>
     <system:String x:Key="BluetoothControlReportMapChangedBody">此更新修改了蓝牙 HID 控制。请在 iPhone/iPad 上忽略现有的 iPhoneMirror 设备，然后重新配对，再启用控制。</system:String>
     <system:String x:Key="BluetoothControlReportMapChangedDetail">移除旧配对后关闭此提示。完成新配对后再次启用蓝牙控制。</system:String>

@@ -3,6 +3,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace IPhoneMirror.App.Services;
@@ -14,6 +15,10 @@ namespace IPhoneMirror.App.Services;
 internal sealed class HlsMediaPlaybackBridge : IDisposable
 {
     private readonly Process _process;
+    private readonly TcpListener _listener;
+    private readonly CancellationTokenSource _serveCancellation = new();
+    private readonly Task _serveTask;
+    private readonly string _requestPath;
     private double _detectedDuration;
     private int _diagnosticOutputReported;
     private bool _disposed;
@@ -22,10 +27,14 @@ internal sealed class HlsMediaPlaybackBridge : IDisposable
         @"Duration:\s*(\d+):([0-5]\d):([0-5]\d(?:\.\d+)?)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private HlsMediaPlaybackBridge(Process process, Uri playbackUri)
+    private HlsMediaPlaybackBridge(Process process, TcpListener listener,
+        Uri playbackUri)
     {
         _process = process;
+        _listener = listener;
         PlaybackUri = playbackUri;
+        _requestPath = playbackUri.AbsolutePath;
+        _serveTask = ServeAsync();
     }
 
     internal Uri PlaybackUri { get; }
@@ -51,8 +60,10 @@ internal sealed class HlsMediaPlaybackBridge : IDisposable
             return null;
         }
 
-        var port = ReserveLoopbackPort();
-        var playbackUri = new Uri($"http://127.0.0.1:{port}/stream.ts",
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var playbackUri = new Uri($"http://127.0.0.1:{port}/stream-{Guid.NewGuid():N}.ts",
             UriKind.Absolute);
         var start = new ProcessStartInfo
         {
@@ -60,7 +71,7 @@ internal sealed class HlsMediaPlaybackBridge : IDisposable
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardError = true,
-            RedirectStandardOutput = false,
+            RedirectStandardOutput = true,
         };
         foreach (var argument in BuildArguments(source, playbackUri, startPosition))
             start.ArgumentList.Add(argument);
@@ -69,8 +80,12 @@ internal sealed class HlsMediaPlaybackBridge : IDisposable
         try
         {
             process = Process.Start(start);
-            if (process is null) return null;
-            var bridge = new HlsMediaPlaybackBridge(process, playbackUri);
+            if (process is null)
+            {
+                listener.Stop();
+                return null;
+            }
+            var bridge = new HlsMediaPlaybackBridge(process, listener, playbackUri);
             process.ErrorDataReceived += (_, args) =>
             {
                 if (string.IsNullOrWhiteSpace(args.Data)) return;
@@ -97,6 +112,7 @@ internal sealed class HlsMediaPlaybackBridge : IDisposable
             catch { }
             diagnostic?.Invoke($"hls_bridge_start_failed error={error.GetType().Name}");
             process?.Dispose();
+            listener.Stop();
             return null;
         }
     }
@@ -126,8 +142,7 @@ internal sealed class HlsMediaPlaybackBridge : IDisposable
             // frames reach WPF at the source cadence instead of arriving in
             // short bursts that look like a low or uneven frame rate.
             "-flush_packets", "1", "-muxdelay", "0", "-muxpreload", "0",
-            "-f", "mpegts", "-content_type", "video/mp2t", "-listen", "1",
-            output.AbsoluteUri,
+            "-f", "mpegts", "pipe:1",
         ]);
         if (double.IsFinite(startPosition) && startPosition > 0.05)
         {
@@ -142,7 +157,7 @@ internal sealed class HlsMediaPlaybackBridge : IDisposable
                     System.Globalization.CultureInfo.InvariantCulture));
                 arguments.Insert(inputIndex, "-ss");
             }
-            var outputIndex = arguments.IndexOf(output.AbsoluteUri);
+            var outputIndex = arguments.IndexOf("pipe:1");
             if (outputIndex >= 0)
             {
                 // HLS input seeking preserves the programme PTS. A fresh
@@ -183,17 +198,86 @@ internal sealed class HlsMediaPlaybackBridge : IDisposable
             RuntimeBinaryIntegrity.IsTrustedFfmpeg(path));
     }
 
-    private static int ReserveLoopbackPort()
+    private async Task ServeAsync()
     {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
+        try
+        {
+            while (!_serveCancellation.IsCancellationRequested)
+            {
+                using var client = await _listener.AcceptTcpClientAsync(
+                    _serveCancellation.Token).ConfigureAwait(false);
+                using var stream = client.GetStream();
+                try
+                {
+                    using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(
+                        _serveCancellation.Token);
+                    requestTimeout.CancelAfter(TimeSpan.FromSeconds(2));
+                    string request;
+                    try
+                    {
+                        request = await ReadRequestLineAsync(stream,
+                            requestTimeout.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (
+                        !_serveCancellation.IsCancellationRequested)
+                    {
+                        // A local client may connect and never complete a request.
+                        // Keep the listener available for the real MediaElement.
+                        continue;
+                    }
+                    if (!request.StartsWith($"GET {_requestPath} ",
+                            StringComparison.Ordinal))
+                        continue;
+
+                    var headers = Encoding.ASCII.GetBytes(
+                        "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n" +
+                        "Connection: close\r\nCache-Control: no-cache\r\n\r\n");
+                    await stream.WriteAsync(headers,
+                        _serveCancellation.Token).ConfigureAwait(false);
+                    await _process.StandardOutput.BaseStream.CopyToAsync(stream,
+                        _serveCancellation.Token).ConfigureAwait(false);
+                    return;
+                }
+                catch (OperationCanceledException) when (
+                    _serveCancellation.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (IOException)
+                {
+                    // A disconnected or probing local client must not take the
+                    // listener down before MediaElement connects.
+                    continue;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (_serveCancellation.IsCancellationRequested) { }
+        catch (IOException) { }
+        catch (ObjectDisposedException) { }
+    }
+
+    private static async Task<string> ReadRequestLineAsync(NetworkStream stream,
+        CancellationToken cancellationToken)
+    {
+        var line = new StringBuilder();
+        var one = new byte[1];
+        while (line.Length < 4096)
+        {
+            var count = await stream.ReadAsync(one, cancellationToken)
+                .ConfigureAwait(false);
+            if (count == 0) return string.Empty;
+            if (one[0] == (byte)'\n') break;
+            if (one[0] != (byte)'\r') line.Append((char)one[0]);
+        }
+        return line.ToString();
     }
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
+        _serveCancellation.Cancel();
+        _listener.Stop();
         try
         {
             if (!_process.HasExited) _process.Kill(entireProcessTree: true);
@@ -203,6 +287,9 @@ internal sealed class HlsMediaPlaybackBridge : IDisposable
         finally
         {
             _process.Dispose();
+            try { _serveTask.Wait(TimeSpan.FromSeconds(2)); }
+            catch { }
+            _serveCancellation.Dispose();
         }
     }
 }

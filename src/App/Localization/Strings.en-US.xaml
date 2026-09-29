@@ -287,19 +287,9 @@
     <system:String x:Key="ReverseControlErrorBodyFormat">{0} reverse control encountered an error: {1}</system:String>
     <system:String x:Key="ReverseControlPrerequisiteStatus">Confirm the prerequisites before continuing</system:String>
     <system:String x:Key="ReverseControlPrerequisiteWiredTitle">Before enabling wired control</system:String>
-    <system:String x:Key="ReverseControlPrerequisiteWiredBody">1. Turn on Developer Mode and restart the device.
-2. Connect by USB, unlock it, and tap “Trust This Computer”.
-3. The matching DDI downloads from GitHub on first use.
-4. No input is sent until setup is ready.
-
-Click Continue when ready, or Cancel.</system:String>
+    <system:String x:Key="ReverseControlPrerequisiteWiredBody">1. Turn on Developer Mode and restart the device.&#x0A;2. Connect by USB, unlock it, and tap “Trust This Computer”.&#x0A;3. The matching DDI downloads from GitHub on first use.&#x0A;4. No input is sent until setup is ready.&#x0A;&#x0A;Click Continue when ready, or Cancel.</system:String>
     <system:String x:Key="ReverseControlPrerequisiteWirelessTitle">Before enabling wireless control</system:String>
-    <system:String x:Key="ReverseControlPrerequisiteWirelessBody">1. Turn on Developer Mode and restart the device.
-2. Complete trust and wireless pairing once over USB.
-3. Keep the device unlocked on the same local network.
-4. Allow iPhoneMirror through Windows Firewall.
-
-Click Continue when ready, or Cancel.</system:String>
+    <system:String x:Key="ReverseControlPrerequisiteWirelessBody">1. Turn on Developer Mode and restart the device.&#x0A;2. Complete trust and wireless pairing once over USB.&#x0A;3. Keep the device unlocked on the same local network.&#x0A;4. Allow iPhoneMirror through Windows Firewall.&#x0A;&#x0A;Click Continue when ready, or Cancel.</system:String>
     <system:String x:Key="BluetoothControlReportMapChangedTitle">Bluetooth control needs pairing refresh</system:String>
     <system:String x:Key="BluetoothControlReportMapChangedBody">This update changes the Bluetooth HID controls. On the iPhone/iPad, forget the existing iPhoneMirror device, then pair it again before enabling control.</system:String>
     <system:String x:Key="BluetoothControlReportMapChangedDetail">Close this message after the old pairing has been removed. Enable Bluetooth control again after completing the new pairing.</system:String>

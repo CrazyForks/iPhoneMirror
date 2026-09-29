@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Windows.Interop;
 using IPhoneMirror.App.Localization;
 using IPhoneMirror.App.Interop;
+using IPhoneMirror.App.Models;
 
 namespace IPhoneMirror.App.Controls;
 
@@ -25,6 +26,8 @@ internal sealed class NativePreviewHost : HwndHost
     private bool _presentationVisible;
     private byte _capturedMouseButtons;
     private bool _isFullScreenPresentation;
+    private DeviceCornerProfile _cornerProfile = DeviceCornerProfile.Rectangular;
+    private bool _usesDeviceCornerProfile;
 
     internal bool CapturePointerInput { get; set; }
     internal bool SuppressMouseMove { get; set; }
@@ -36,8 +39,11 @@ internal sealed class NativePreviewHost : HwndHost
     internal void ReleasePointerCapture()
     {
         _capturedMouseButtons = 0;
-        if (_window != 0 && GetCapture() == _window)
-            _ = ReleaseCapture();
+        // The child HWND can lose GetCapture() during a focus transition while
+        // the thread still owns capture. Releasing unconditionally is safe for
+        // this route reset and prevents the native preview from swallowing all
+        // subsequent clicks after Bluetooth control exits.
+        if (_window != 0) _ = ReleaseCapture();
     }
     internal bool IsFullScreenPresentation
     {
@@ -50,6 +56,14 @@ internal sealed class NativePreviewHost : HwndHost
         }
     }
     internal nint WindowHandle => _window;
+
+    internal void SetDeviceCornerProfile(DeviceCornerProfile profile, bool enabled)
+    {
+        if (_usesDeviceCornerProfile == enabled && _cornerProfile == profile) return;
+        _usesDeviceCornerProfile = enabled;
+        _cornerProfile = profile;
+        UpdateWindowRegion();
+    }
 
     internal event EventHandler<PreviewPointerEventArgs>? PointerInput;
     internal event EventHandler<PreviewKeyboardEventArgs>? KeyboardInput;
@@ -135,14 +149,60 @@ internal sealed class NativePreviewHost : HwndHost
             _ = SetWindowRgn(_window, 0, true);
             return;
         }
+        var shortEdge = Math.Min(width, height);
         var dpi = GetDpiForWindow(_window);
-        var radius = Math.Max(2, (int)Math.Round(MainPreviewInnerCornerRadius *
-            (dpi == 0 ? 1.0 : dpi / 96.0)));
-        var region = CreateRoundRectRgn(0, 0, width, height,
-            radius * 2, radius * 2);
+        var radius = _usesDeviceCornerProfile
+            ? _cornerProfile.GetGdiRadius(shortEdge, dpi == 0 ? 1.0 : dpi / 96.0)
+            : Math.Max(2, (int)Math.Round(MainPreviewInnerCornerRadius *
+                (dpi == 0 ? 1.0 : dpi / 96.0)));
+        if (radius == 0)
+        {
+            _ = SetWindowRgn(_window, 0, true);
+            return;
+        }
+        // The D3D shader uses the device profile's superellipse and smooths
+        // its edge. Keep the HWND's opaque region on that same curve so the
+        // child does not expose a generic circular iPhone corner underneath
+        // the shader when compact mode removes the WPF preview frame.
+        var region = _usesDeviceCornerProfile
+            ? CreateDeviceCornerRegion(width, height, radius,
+                _cornerProfile.CurveExponent)
+            : CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2);
         if (region == 0) return;
         // SetWindowRgn owns the region after success.
         if (SetWindowRgn(_window, region, true) == 0) _ = DeleteObject(region);
+    }
+
+    private static nint CreateDeviceCornerRegion(int width, int height, int radius,
+        double exponent)
+    {
+        const int segmentsPerCorner = 64;
+        if (radius <= 0 || width <= radius * 2 || height <= radius * 2)
+            return CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2);
+
+        var curve = Math.Clamp(exponent, 1.5, 4.0);
+        var points = new NativePoint[segmentsPerCorner * 4 + 4];
+        var index = 0;
+        AddCorner(width - radius, radius, -Math.PI / 2, 0);
+        AddCorner(width - radius, height - radius, 0, Math.PI / 2);
+        AddCorner(radius, height - radius, Math.PI / 2, Math.PI);
+        AddCorner(radius, radius, Math.PI, Math.PI * 1.5);
+        return CreatePolygonRgn(points, index, Windings);
+
+        void AddCorner(double centerX, double centerY, double from, double to)
+        {
+            for (var segment = 0; segment <= segmentsPerCorner; segment++)
+            {
+                var angle = from + (to - from) * segment / segmentsPerCorner;
+                var x = Math.Pow(Math.Abs(Math.Cos(angle)), 2.0 / curve);
+                var y = Math.Pow(Math.Abs(Math.Sin(angle)), 2.0 / curve);
+                points[index++] = new NativePoint
+                {
+                    X = (int)Math.Round(centerX + radius * Math.Sign(Math.Cos(angle)) * x),
+                    Y = (int)Math.Round(centerY + radius * Math.Sign(Math.Sin(angle)) * y),
+                };
+            }
+        }
     }
 
     protected override void DestroyWindowCore(HandleRef hwnd)
@@ -319,6 +379,13 @@ internal sealed class NativePreviewHost : HwndHost
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        internal int X;
+        internal int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct NativeMessage
     {
         internal nint Hwnd;
@@ -350,6 +417,12 @@ internal sealed class NativePreviewHost : HwndHost
     [DllImport("gdi32.dll")]
     private static extern nint CreateRoundRectRgn(int left, int top, int right, int bottom,
         int ellipseWidth, int ellipseHeight);
+
+    private const int Windings = 2;
+
+    [DllImport("gdi32.dll")]
+    private static extern nint CreatePolygonRgn([In] NativePoint[] points, int count,
+        int mode);
 
     [DllImport("user32.dll")]
     private static extern int SetWindowRgn(nint window, nint region, [MarshalAs(UnmanagedType.Bool)] bool redraw);
